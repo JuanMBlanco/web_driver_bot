@@ -39,7 +39,7 @@ viewport:
 # Task configuration
 task:
   # URL to check
-  url: "https://dm.ezcater.com/s/sm3lvb0qup"
+  url: "https://dm.ezcater.com/s/eo93lrew2v"
   # Interval in seconds between checks
   checkInterval: 60
   # Phone number for requesting new delivery links when expired

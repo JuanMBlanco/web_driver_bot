@@ -1460,6 +1460,7 @@ async function checkListAndClick(config: BotConfig): Promise<{ processed: number
             logMessage(`Error saving tickets summary to file: ${fileError.message}`, 'ERROR');
           }
           
+          
           // Show expired deliveries
           if (expiredDeliveries.length > 0) {
             logMessage(`\n⚠️  Found ${expiredDeliveries.length} EXPIRED delivery(ies) that will be skipped:`);
