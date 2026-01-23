@@ -2,7 +2,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import bodyParser from 'body-parser';
 import fs from 'fs';
-import { mkdirSync, writeFileSync, unlinkSync, readFileSync, statSync } from 'fs';
+import { mkdirSync, writeFileSync, unlinkSync, readFileSync, statSync, appendFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -41,9 +41,12 @@ interface BotConfig {
   task: {
     url: string;
     checkInterval: number;
-    clickSelectors: string[];
-    listSelector: string;
+    clickSelectors?: string[];
+    listSelector?: string;
     maxItemsPerCycle?: number;
+    phoneNumber?: string;
+    maxReloadAttempts?: number;
+    reloadWaitTime?: number;
   };
   paths: {
     pidFile: string;
@@ -702,7 +705,1159 @@ async function initBrowser(url: string, context: string): Promise<InitBrowserRes
 }
 
 /**
- * Check list and click elements
+ * Convert current time to EST (Eastern Standard Time)
+ * Uses 'America/New_York' timezone which automatically handles EST/EDT
+ * Returns a Date object representing the current time in EST
+ */
+function getCurrentTimeEST(): Date {
+  const now = new Date();
+  
+  // Get current time components in EST timezone
+  const estFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  
+  const parts = estFormatter.formatToParts(now);
+  const year = parseInt(parts.find(p => p.type === 'year')?.value || '0', 10);
+  const month = parseInt(parts.find(p => p.type === 'month')?.value || '0', 10);
+  const day = parseInt(parts.find(p => p.type === 'day')?.value || '0', 10);
+  const hour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+  const minute = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+  const second = parseInt(parts.find(p => p.type === 'second')?.value || '0', 10);
+  
+  // Create a Date object with EST time components
+  const estDate = new Date(year, month - 1, day, hour, minute, second);
+  
+  return estDate;
+}
+
+/**
+ * Parse time string like "12:00 PM EST" and convert to Date object
+ */
+function parseDeliveryTime(timeString: string): { parsed: Date | null } {
+  const now = new Date();
+  
+  // Parse delivery time string (e.g., "12:00 PM EST")
+  const timeMatch = timeString.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (!timeMatch) {
+    return { parsed: null };
+  }
+  
+  const [, hoursStr, minutesStr, period] = timeMatch;
+  const hours = parseInt(hoursStr, 10);
+  const minutes = parseInt(minutesStr, 10);
+  const hours24 = period.toUpperCase() === 'PM' && hours !== 12 ? hours + 12 : 
+                  period.toUpperCase() === 'AM' && hours === 12 ? 0 : hours;
+  
+  const deliveryDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours24, minutes);
+  
+  return { parsed: deliveryDate };
+}
+
+/**
+ * Check if page contains "No Deliveries available" text
+ */
+async function checkNoDeliveries(page: puppeteer.Page): Promise<boolean> {
+  try {
+    const hasNoDeliveries = await page.evaluate(() => {
+      const allText = document.body.innerText.toLowerCase();
+      return allText.includes('no deliveries available');
+    });
+    return hasNoDeliveries;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Check if page contains "expired" or "Delivering an order?" text anywhere
+ */
+async function checkExpired(page: puppeteer.Page): Promise<boolean> {
+  try {
+    const isExpired = await page.evaluate(() => {
+      const h3Elements = Array.from(document.querySelectorAll('h3'));
+      const exactMatch = h3Elements.find(h3 => {
+        const text = h3.textContent?.trim();
+        return text === "Expired Link";
+      });
+      
+      if (exactMatch) return true;
+      
+      const allText = document.body.innerText;
+      const allTextLower = allText.toLowerCase();
+      
+      if (allTextLower.includes('delivering an order?')) return true;
+      
+      const bodyClone = document.body.cloneNode(true) as HTMLElement;
+      const chipLabels = bodyClone.querySelectorAll('span.MuiChip-label');
+      chipLabels.forEach(chip => chip.remove());
+      
+      const textWithoutChips = bodyClone.innerText.toLowerCase();
+      if (textWithoutChips.includes('expired')) return true;
+      
+      return false;
+    });
+    return isExpired;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Request new delivery link when expired
+ */
+async function requestNewLink(page: puppeteer.Page, phoneNumber: string): Promise<boolean> {
+  try {
+    logMessage('Requesting new delivery link...');
+    
+    await waitRandomTime(1000, 2000);
+    
+    let inputHandle: puppeteer.ElementHandle<HTMLInputElement> | null = null;
+    
+    try {
+      inputHandle = await page.waitForSelector(
+        'input[type="text"][placeholder="Enter your phone number"][name^="radix-"]',
+        { timeout: 5000 }
+      ) as puppeteer.ElementHandle<HTMLInputElement> | null;
+    } catch (e) {
+      // Try strategy 2
+    }
+    
+    if (!inputHandle) {
+      try {
+        inputHandle = await page.waitForSelector(
+          'input[type="text"][placeholder="Enter your phone number"][id^="radix-"]',
+          { timeout: 5000 }
+        ) as puppeteer.ElementHandle<HTMLInputElement> | null;
+      } catch (e) {
+        // Try strategy 3
+      }
+    }
+    
+    if (!inputHandle) {
+      try {
+        inputHandle = await page.waitForSelector(
+          'input[type="text"][placeholder="Enter your phone number"]',
+          { timeout: 5000 }
+        ) as puppeteer.ElementHandle<HTMLInputElement> | null;
+      } catch (e) {
+        logMessage('Could not find phone number input field', 'ERROR');
+        return false;
+      }
+    }
+    
+    if (!inputHandle) {
+      logMessage('Phone number input field not found', 'ERROR');
+      return false;
+    }
+    
+    await inputHandle.focus();
+    await waitRandomTime(500, 1000);
+    await page.type('input[type="text"][placeholder="Enter your phone number"]', phoneNumber, { delay: 50 });
+    logMessage(`Entered phone number: ${phoneNumber}`);
+    
+    return true;
+  } catch (error: any) {
+    logMessage(`Error requesting new link: ${error.message}`, 'ERROR');
+    return false;
+  }
+}
+
+/**
+ * Get delivery status by searching the entire page for the order
+ */
+async function getDeliveryStatusFromPage(page: puppeteer.Page, orderNumber: string): Promise<string | null> {
+  try {
+    const status = await page.evaluate((orderNum) => {
+      const allContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+      for (const container of allContainers) {
+        const orderDiv = container.querySelector('div.ez-7crqac');
+        if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+          const statusDiv = container.querySelector('div[data-testid="delivery-status-text"]');
+          if (statusDiv) {
+            const chip = statusDiv.querySelector('span.MuiChip-label.EzChip-label.MuiChip-labelMedium.ez-14vsv3w');
+            if (chip) {
+              const chipText = chip.textContent?.trim();
+              if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+                return chipText;
+              }
+            }
+            
+            const allChipsInStatus = statusDiv.querySelectorAll('span.MuiChip-label');
+            for (let chip of Array.from(allChipsInStatus)) {
+              const chipText = chip.textContent?.trim();
+              if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+                return chipText;
+              }
+            }
+          }
+          
+          const chips = container.querySelectorAll('span.MuiChip-label.EzChip-label.MuiChip-labelMedium.ez-14vsv3w');
+          for (let chip of Array.from(chips)) {
+            const chipText = chip.textContent?.trim();
+            if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+              return chipText;
+            }
+          }
+          
+          const allChips = container.querySelectorAll('span.MuiChip-label');
+          for (let chip of Array.from(allChips)) {
+            const chipText = chip.textContent?.trim();
+            if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+              return chipText;
+            }
+          }
+        }
+      }
+      return null;
+    }, orderNumber);
+    
+    if (status) {
+      logMessage(`  ✓ Found status "${status}" for order ${orderNumber} using page-level search`);
+    }
+    
+    return status;
+  } catch (error: any) {
+    logMessage(`  ✗ Error in page-level status search for order ${orderNumber}: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Get delivery status for a specific order container
+ */
+async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLElement, orderNumber: string): Promise<string | null> {
+  try {
+    const isValidContainer = await page.evaluate((container) => {
+      return container && typeof container.querySelectorAll === 'function';
+    }, deliveryContainer);
+    
+    if (!isValidContainer) {
+      logMessage(`  ⚠ Container for order ${orderNumber} is not a valid DOM element, using page-level search`, 'WARNING');
+      return await getDeliveryStatusFromPage(page, orderNumber);
+    }
+    
+    const status = await page.evaluate((container, orderNum) => {
+      if (!container || typeof container.querySelectorAll !== 'function') {
+        return null;
+      }
+      
+      const statusDiv = container.querySelector('div[data-testid="delivery-status-text"]');
+      if (statusDiv) {
+        const chip = statusDiv.querySelector('span.MuiChip-label.EzChip-label.MuiChip-labelMedium.ez-14vsv3w');
+        if (chip) {
+          const chipText = chip.textContent?.trim();
+          if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+            return chipText;
+          }
+        }
+        
+        const allChipsInStatus = statusDiv.querySelectorAll('span.MuiChip-label');
+        for (let chip of Array.from(allChipsInStatus)) {
+          const chipText = chip.textContent?.trim();
+          if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+            return chipText;
+          }
+        }
+      }
+      
+      const chips = container.querySelectorAll('span.MuiChip-label.EzChip-label.MuiChip-labelMedium.ez-14vsv3w');
+      for (let chip of Array.from(chips)) {
+        const chipText = chip.textContent?.trim();
+        if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+          return chipText;
+        }
+      }
+      
+      const allChips = container.querySelectorAll('span.MuiChip-label');
+      for (let chip of Array.from(allChips)) {
+        const chipText = chip.textContent?.trim();
+        if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
+          return chipText;
+        }
+      }
+      
+      return null;
+    }, deliveryContainer, orderNumber);
+    
+    if (!status) {
+      const broaderStatus = await getDeliveryStatusFromPage(page, orderNumber);
+      if (broaderStatus) {
+        return broaderStatus;
+      }
+    }
+    
+    return status;
+  } catch (error: any) {
+    logMessage(`  ✗ Error getting status for order ${orderNumber}: ${error.message}`, 'ERROR');
+    return await getDeliveryStatusFromPage(page, orderNumber);
+  }
+}
+
+/**
+ * Process delivery orders with continuous monitoring logic
+ */
+async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>> {
+  const results: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }> = [];
+  
+  try {
+    logMessage('Processing deliveries for continuous monitoring...');
+    
+    const currentTime = getCurrentTimeEST();
+    const currentTimeMs = currentTime.getTime();
+    
+    logMessage(`Current time (EST - used for comparisons): ${currentTime.toLocaleTimeString()}`);
+    
+    await page.evaluate(() => {
+      const h2Elements = Array.from(document.querySelectorAll('h2'));
+      const upcomingH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Upcoming';
+      });
+      
+      let upcomingContainer: HTMLElement | null = null;
+      if (upcomingH2) {
+        let container = upcomingH2.parentElement;
+        while (container && container !== document.body) {
+          if (container.firstElementChild === upcomingH2) {
+            upcomingContainer = container;
+            break;
+          }
+          container = container.parentElement;
+        }
+      }
+      
+      const todayH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Today';
+      });
+      
+      if (!todayH2) return;
+      
+      let container = todayH2.parentElement;
+      while (container && container !== document.body) {
+        if (container.firstElementChild === todayH2) {
+          const parent = container.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children);
+            let spanIndex = 0;
+            
+            siblings.forEach((sibling) => {
+              if (upcomingContainer && (sibling === upcomingContainer || upcomingContainer.contains(sibling))) {
+                return;
+              }
+              
+              const timeSpans = Array.from(sibling.querySelectorAll('span.c-AsWAM'));
+              timeSpans.forEach((span) => {
+                if (upcomingContainer && upcomingContainer.contains(span)) {
+                  return;
+                }
+                
+                const timeText = span.textContent?.trim() || '';
+                if (timeText.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
+                  span.setAttribute('data-delivery-time-id', spanIndex.toString());
+                  spanIndex++;
+                }
+              });
+            });
+            break;
+          }
+        }
+        container = container.parentElement;
+      }
+    });
+    
+    const deliveryData = await page.evaluate(() => {
+      const h2Elements = Array.from(document.querySelectorAll('h2'));
+      const upcomingH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Upcoming';
+      });
+      
+      let upcomingContainer: HTMLElement | null = null;
+      if (upcomingH2) {
+        let container = upcomingH2.parentElement;
+        while (container && container !== document.body) {
+          if (container.firstElementChild === upcomingH2) {
+            upcomingContainer = container;
+            break;
+          }
+          container = container.parentElement;
+        }
+      }
+      
+      const todayH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Today';
+      });
+      
+      if (!todayH2) return null;
+      
+      let container = todayH2.parentElement;
+      while (container && container !== document.body) {
+        if (container.firstElementChild === todayH2) {
+          const parent = container.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children);
+            const deliveryItems: Array<{ timeText: string, orderNumber: string, spanId: string }> = [];
+            
+            siblings.forEach((sibling) => {
+              if (upcomingContainer && (sibling === upcomingContainer || upcomingContainer.contains(sibling))) {
+                return;
+              }
+              
+              const timeSpans = Array.from(sibling.querySelectorAll('span.c-AsWAM[data-delivery-time-id]'));
+              
+              timeSpans.forEach((span) => {
+                if (upcomingContainer && upcomingContainer.contains(span)) {
+                  return;
+                }
+                
+                const timeText = span.textContent?.trim() || '';
+                if (timeText.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
+                  const spanId = span.getAttribute('data-delivery-time-id') || '';
+                  
+                  let deliveryItem = span.parentElement;
+                  let orderNumber = '';
+                  
+                  while (deliveryItem && deliveryItem !== document.body) {
+                    const orderDiv = deliveryItem.querySelector('div.ez-7crqac');
+                    if (orderDiv) {
+                      orderNumber = orderDiv.textContent?.trim() || '';
+                      break;
+                    }
+                    deliveryItem = deliveryItem.parentElement;
+                  }
+                  
+                  if (!orderNumber) {
+                    let fallbackItem = span.parentElement;
+                    while (fallbackItem && fallbackItem !== document.body) {
+                      const orderMatch = fallbackItem.textContent?.match(/#[A-Z0-9-]+/);
+                      if (orderMatch) {
+                        orderNumber = orderMatch[0];
+                        break;
+                      }
+                      fallbackItem = fallbackItem.parentElement;
+                    }
+                  }
+                  
+                  if (orderNumber) {
+                    deliveryItems.push({
+                      timeText: timeText,
+                      orderNumber: orderNumber,
+                      spanId: spanId
+                    });
+                  }
+                }
+              });
+            });
+            
+            return deliveryItems;
+          }
+        }
+        container = container.parentElement;
+      }
+      
+      return null;
+    });
+    
+    if (!deliveryData || deliveryData.length === 0) {
+      logMessage('No delivery items found in "Today" section', 'WARNING');
+      return results;
+    }
+    
+    logMessage(`Found ${deliveryData.length} delivery item(s) in "Today" section`);
+    
+    for (let i = 0; i < deliveryData.length; i++) {
+      const delivery = deliveryData[i];
+      if (!delivery || !delivery.timeText || !delivery.orderNumber) {
+        logMessage(`Skipping delivery ${i + 1}/${deliveryData.length}: missing data`, 'WARNING');
+        continue;
+      }
+      
+      logMessage(`Reviewing order ${i + 1}/${deliveryData.length}: ${delivery.orderNumber} (${delivery.timeText})`);
+      
+      try {
+        const { parsed: deliveryTime } = parseDeliveryTime(delivery.timeText);
+        if (!deliveryTime) {
+          logMessage(`  Could not parse time: ${delivery.timeText}`, 'WARNING');
+          results.push({
+            orderNumber: delivery.orderNumber,
+            timeText: delivery.timeText,
+            status: null,
+            shouldClick: false,
+            reason: 'Could not parse time',
+            actionType: null
+          });
+          continue;
+        }
+        
+        const timeDiffMs = deliveryTime.getTime() - currentTime.getTime();
+        const timeDiffMinutes = Math.floor(timeDiffMs / (1000 * 60));
+        logMessage(`  Time comparison (EST): Delivery=${deliveryTime.toLocaleTimeString()}, Current=${currentTime.toLocaleTimeString()}, Diff=${timeDiffMinutes} min`);
+        
+        let status: string | null = null;
+        try {
+          const deliveryItemHandle = await page.evaluateHandle((orderNum) => {
+            const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+            for (const container of allDeliveryContainers) {
+              const orderDiv = container.querySelector('div.ez-7crqac');
+              if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+                return container as HTMLElement;
+              }
+            }
+            return null;
+          }, delivery.orderNumber);
+          
+          const itemValue = await deliveryItemHandle.jsonValue();
+          
+          if (itemValue) {
+            status = await getDeliveryStatus(page, itemValue as HTMLElement, delivery.orderNumber);
+            if (status) {
+              logMessage(`  ✓ Found status "${status}" for order ${delivery.orderNumber}`);
+            } else {
+              logMessage(`  ⚠ Status not found for order ${delivery.orderNumber}`, 'WARNING');
+            }
+          } else {
+            logMessage(`  ⚠ Could not find delivery container for order ${delivery.orderNumber}`, 'WARNING');
+          }
+          
+          await deliveryItemHandle.dispose();
+        } catch (statusError: any) {
+          logMessage(`  Error getting status for ${delivery.orderNumber}: ${statusError.message}`, 'WARNING');
+        }
+        
+        let shouldClick = false;
+        let reason = '';
+        let actionType: 'param1' | 'param2' | 'rule3' | null = null;
+        
+        if (status === 'Expired') {
+          shouldClick = false;
+          reason = 'Expired';
+        } else if (status) {
+          const deliveryTimeMs = deliveryTime.getTime();
+          const currentTimeMs = currentTime.getTime();
+          
+          const param1Start = new Date(deliveryTimeMs - 3 * 60 * 1000);
+          const param1End = new Date(deliveryTimeMs + 3 * 60 * 1000);
+          const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
+          
+          const param2Base = new Date(deliveryTimeMs - 15 * 60 * 1000);
+          const param2Start = new Date(param2Base.getTime() - 3 * 60 * 1000);
+          const param2End = new Date(param2Base.getTime() + 3 * 60 * 1000);
+          const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
+          
+          const currentTimeGreater = currentTimeMs > deliveryTimeMs;
+          
+          logMessage(`  Status: ${status}, InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
+          
+          if (inParam1 && status === 'En Route to Customer') {
+            shouldClick = true;
+            actionType = 'param1';
+            reason = 'Param1 range AND En Route to Customer';
+            logMessage(`  ✓ Rule 1 matched: Order ${delivery.orderNumber} is in param1 range with "En Route to Customer" status`);
+          }
+          
+          if (inParam2 && status === 'Delivery Scheduled') {
+            shouldClick = true;
+            actionType = 'param2';
+            reason = 'Param2 range AND Delivery Scheduled';
+            logMessage(`  ✓ Rule 2 matched: Order ${delivery.orderNumber} is in param2 range with "Delivery Scheduled" status`);
+          }
+          
+          if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
+            if (!shouldClick) {
+              shouldClick = true;
+              actionType = 'rule3';
+              reason = `Delivery time < current time AND status is ${status}`;
+              logMessage(`  ✓ Rule 3 matched: Order ${delivery.orderNumber} has passed current time with status "${status}"`);
+            }
+          }
+        } else {
+          logMessage(`  No status found for order ${delivery.orderNumber}`, 'WARNING');
+        }
+        
+        results.push({
+          orderNumber: delivery.orderNumber,
+          timeText: delivery.timeText,
+          status: status,
+          shouldClick: shouldClick,
+          reason: reason,
+          actionType: actionType
+        });
+        
+        if (shouldClick) {
+          logMessage(`  ✓ Order ${delivery.orderNumber} (${delivery.timeText}, status: ${status}) - WILL CLICK: ${reason}`);
+        } else {
+          logMessage(`  - Order ${delivery.orderNumber} (${delivery.timeText}, status: ${status}) - SKIP: ${reason}`);
+        }
+      } catch (error: any) {
+        logMessage(`  ✗ Error processing order ${delivery.orderNumber}: ${error.message}`, 'ERROR');
+        results.push({
+          orderNumber: delivery.orderNumber,
+          timeText: delivery.timeText,
+          status: null,
+          shouldClick: false,
+          reason: `Error: ${error.message}`,
+          actionType: null
+        });
+      }
+    }
+    
+    logMessage(`\n✓ Finished reviewing all ${deliveryData.length} order(s) in "Today" section`);
+    
+  } catch (error: any) {
+    logMessage(`Error processing continuous deliveries: ${error.message}`, 'ERROR');
+  }
+  
+  return results;
+}
+
+/**
+ * Click a button by its text content
+ * TEMPORARILY COMMENTED: Button clicks are disabled for testing
+ */
+async function clickButtonByText(page: puppeteer.Page, buttonText: string, timeout: number = 10000): Promise<boolean> {
+  try {
+    logMessage(`  Looking for button: "${buttonText}"`);
+    logMessage(`  [TEMPORARILY COMMENTED] Would click button: "${buttonText}"`);
+    
+    // TEMPORARILY COMMENTED: All button click functionality
+    /*
+    if (buttonText === "I'm on my way") {
+      try {
+        await page.waitForSelector('div.ez-7xofcs button', { timeout });
+        
+        const btnHandle = await page.evaluateHandle(() => {
+          const container = document.querySelector('div.ez-7xofcs');
+          if (container) {
+            const button = container.querySelector('button');
+            if (button && button.textContent?.trim() === "I'm on my way") {
+              return button as HTMLButtonElement;
+            }
+          }
+          return null;
+        });
+        
+        const btnValue = await btnHandle.jsonValue();
+        if (btnValue) {
+          const box = await (btnHandle as puppeteer.ElementHandle<HTMLButtonElement>).boundingBox();
+          
+          if (box) {
+            await waitRandomTime(1000, 1500);
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await waitRandomTime(500, 1000);
+            await page.mouse.down();
+            await page.mouse.up();
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (using specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          } else {
+            await page.evaluate((handle) => {
+              const element = handle as HTMLButtonElement;
+              if (element) {
+                element.click();
+              }
+            }, btnHandle);
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method, specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          }
+        }
+      } catch (specificError: any) {
+        logMessage(`  Specific selector for "I'm on my way" failed, trying generic method...`, 'WARNING');
+      }
+    }
+    
+    if (buttonText === "Delivery is done") {
+      try {
+        await page.waitForSelector('div.ez-7xofcs button', { timeout });
+        
+        const btnHandle = await page.evaluateHandle(() => {
+          const container = document.querySelector('div.ez-7xofcs');
+          if (container) {
+            const button = container.querySelector('button');
+            if (button && button.textContent?.trim() === 'Delivery is done') {
+              return button as HTMLButtonElement;
+            }
+          }
+          return null;
+        });
+        
+        const btnValue = await btnHandle.jsonValue();
+        if (btnValue) {
+          const box = await (btnHandle as puppeteer.ElementHandle<HTMLButtonElement>).boundingBox();
+          
+          if (box) {
+            await waitRandomTime(1000, 1500);
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await waitRandomTime(500, 1000);
+            await page.mouse.down();
+            await page.mouse.up();
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (using specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          } else {
+            await page.evaluate((handle) => {
+              const element = handle as HTMLButtonElement;
+              if (element) {
+                element.click();
+              }
+            }, btnHandle);
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method, specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          }
+        }
+      } catch (specificError: any) {
+        logMessage(`  Specific selector for "Delivery is done" failed, trying generic method...`, 'WARNING');
+      }
+    }
+    
+    await page.waitForFunction((text) => {
+      return Array.from(document.querySelectorAll('button'))
+        .some(btn => btn.textContent?.trim() === text);
+    }, { timeout }, buttonText);
+    
+    const btnHandle = await page.evaluateHandle((text) => {
+      return Array.from(document.querySelectorAll('button'))
+        .find(btn => btn.textContent?.trim() === text);
+    }, buttonText);
+    
+    const btnValue = await btnHandle.jsonValue();
+    if (!btnValue) {
+      logMessage(`  Button "${buttonText}" not found`, 'WARNING');
+      return false;
+    }
+    
+    const box = await (btnHandle as puppeteer.ElementHandle<HTMLButtonElement>).boundingBox();
+    
+    if (box) {
+      await waitRandomTime(1000, 1500);
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await waitRandomTime(500, 1000);
+      await page.mouse.down();
+      await page.mouse.up();
+      logMessage(`  ✓ Successfully clicked button: "${buttonText}"`);
+      await btnHandle.dispose();
+      return true;
+    } else {
+      await page.evaluate((handle) => {
+        const element = handle as HTMLButtonElement;
+        if (element) {
+          element.click();
+        }
+      }, btnHandle);
+      logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method)`);
+      await btnHandle.dispose();
+      return true;
+    }
+    */
+    
+    // Return true to simulate successful click (for testing)
+    return true;
+  } catch (error: any) {
+    logMessage(`  ✗ Error clicking button "${buttonText}": ${error.message}`, 'WARNING');
+    return false;
+  }
+}
+
+/**
+ * Wait for order ticket to appear on page
+ */
+async function waitForOrderTicket(page: puppeteer.Page, orderNumber: string, timeout: number = 10000): Promise<boolean> {
+  try {
+    await page.waitForFunction((searchValue) => {
+      return Array.from(document.querySelectorAll('div')).some(div => 
+        div.textContent?.trim().includes(searchValue)
+      );
+    }, { timeout }, orderNumber);
+    
+    await waitRandomTime(1000, 1500);
+    
+    return true;
+  } catch (error: any) {
+    logMessage(`  ⚠ Order ticket ${orderNumber} not found on page`, 'WARNING');
+    return false;
+  }
+}
+
+/**
+ * Perform button actions on order page
+ * TEMPORARILY COMMENTED: Button clicks are disabled for testing
+ */
+async function performOrderActions(page: puppeteer.Page, orderNumber: string, fullProcess: boolean = true): Promise<boolean> {
+  try {
+    logMessage(`  Performing actions for order ${orderNumber}...`);
+    logMessage(`  Action type: ${fullProcess ? 'Full process' : 'Only "I\'m on my way"'}`);
+    logMessage(`  [TEMPORARILY COMMENTED] Button clicks are disabled - would perform actions for order ${orderNumber}`);
+    
+    await waitForOrderTicket(page, orderNumber);
+    
+    // TEMPORARILY COMMENTED: Button click actions
+    /*
+    const onMyWayClicked = await clickButtonByText(page, "I'm on my way");
+    if (!onMyWayClicked) {
+      logMessage(`  Could not click "I'm on my way" button, continuing anyway...`, 'WARNING');
+    }
+    
+    if (!fullProcess) {
+      logMessage(`  ✓ Completed actions for order ${orderNumber} (param2 - only "I'm on my way")`);
+      return true;
+    }
+    
+    await waitRandomTime(500, 1000);
+    
+    const deliveryDoneClicked = await clickButtonByText(page, "Delivery is done", 5000);
+    if (deliveryDoneClicked) {
+      logMessage(`  ✓ Clicked "Delivery is done" button`);
+      await waitRandomTime(2000, 3000);
+    } else {
+      logMessage(`  "Delivery is done" button not found (may not be available for this order)`, 'INFO');
+    }
+    
+    const confirmClicked = await clickButtonByText(page, "Confirm", 5000);
+    if (confirmClicked) {
+      logMessage(`  ✓ Clicked "Confirm" button`);
+      await waitRandomTime(2000, 3000);
+    } else {
+      logMessage(`  "Confirm" button not found (may not be available for this order)`, 'INFO');
+    }
+    */
+    
+    logMessage(`  ✓ Completed actions for order ${orderNumber} (simulated - buttons commented)`);
+    return true;
+  } catch (error: any) {
+    logMessage(`  ✗ Error performing actions for order ${orderNumber}: ${error.message}`, 'ERROR');
+    return false;
+  }
+}
+
+/**
+ * Click on a delivery order, perform button actions, and return to list
+ */
+async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string, fullProcess: boolean = true): Promise<boolean> {
+  try {
+    logMessage(`Clicking on order ${orderNumber}...`);
+    
+    let deliveryItemHandle = await page.evaluateHandle((orderNum) => {
+      const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+      for (const container of allDeliveryContainers) {
+        const orderDiv = container.querySelector('div.ez-7crqac');
+        if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+          return container as HTMLElement;
+        }
+      }
+      return null;
+    }, orderNumber);
+    
+    const itemValue = await deliveryItemHandle.jsonValue();
+    if (!itemValue) {
+      logMessage(`Could not find delivery item for order ${orderNumber}`, 'ERROR');
+      return false;
+    }
+    
+    const box = await (deliveryItemHandle as puppeteer.ElementHandle<HTMLElement>).boundingBox();
+    if (box) {
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await waitRandomTime(500, 1000);
+      await page.mouse.down();
+      await page.mouse.up();
+    } else {
+      await page.evaluate((handle) => {
+        const element = handle as HTMLElement;
+        if (element) {
+          element.click();
+        }
+      }, deliveryItemHandle as puppeteer.ElementHandle<HTMLElement>);
+    }
+    
+    await waitRandomTime(1000, 2000);
+    
+    try {
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    } catch (navError) {
+      logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
+    }
+    
+    await waitRandomTime(1000, 2000);
+    
+    const currentUrl = page.url();
+    if (currentUrl.includes('/deliveries')) {
+      logMessage(`Navigation failed, still on deliveries page`, 'WARNING');
+      await deliveryItemHandle.dispose();
+      return false;
+    }
+    
+    logMessage(`Successfully navigated to order details`);
+    
+    await performOrderActions(page, orderNumber, fullProcess);
+    
+    logMessage(`Returning to deliveries list...`);
+    
+    const currentUrlBeforeReturn = page.url();
+    if (currentUrlBeforeReturn.includes('/deliveries')) {
+      logMessage(`Already on deliveries page, no need to click link`);
+      await deliveryItemHandle.dispose();
+      return true;
+    }
+    
+    const deliveriesLink = await page.evaluateHandle(() => {
+      const links = Array.from(document.querySelectorAll('a'));
+      return links.find(link => {
+        const href = link.getAttribute('href');
+        return href === '/deliveries' || href === '/deliveries/';
+      });
+    });
+    
+    const linkValue = await deliveriesLink.jsonValue();
+    if (linkValue) {
+      await page.evaluate((handle) => {
+        const element = handle as HTMLAnchorElement;
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, deliveriesLink);
+      
+      await waitRandomTime(500, 1000);
+      
+      const linkBox = await (deliveriesLink as puppeteer.ElementHandle<HTMLAnchorElement>).boundingBox();
+      if (linkBox) {
+        await page.mouse.move(linkBox.x + linkBox.width / 2, linkBox.y + linkBox.height / 2);
+        await waitRandomTime(500, 1000);
+        await page.mouse.down();
+        await page.mouse.up();
+      } else {
+        await page.evaluate((handle) => {
+          const element = handle as HTMLAnchorElement;
+          if (element) {
+            element.click();
+          }
+        }, deliveriesLink);
+      }
+      
+      await waitRandomTime(1000, 2000);
+      
+      try {
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+      } catch (navError) {
+        logMessage('Navigation back may have completed or timed out, continuing...', 'WARNING');
+      }
+      
+      await waitRandomTime(1000, 2000);
+      
+      const finalUrl = page.url();
+      if (finalUrl.includes('/deliveries')) {
+        logMessage(`✓ Successfully returned to deliveries list`);
+        await deliveryItemHandle.dispose();
+        return true;
+      } else {
+        logMessage('Not on deliveries page after clicking link, trying alternative methods...', 'WARNING');
+      }
+    } else {
+      logMessage('Deliveries link not found, trying to navigate back', 'WARNING');
+    }
+    
+    try {
+      await page.goBack();
+      await waitRandomTime(1000, 2000);
+      
+      const finalUrl = page.url();
+      if (finalUrl.includes('/deliveries')) {
+        logMessage(`✓ Successfully returned to deliveries list (via goBack)`);
+        await deliveryItemHandle.dispose();
+        return true;
+      }
+    } catch (backError) {
+      logMessage('goBack failed, trying direct navigation...', 'WARNING');
+    }
+    
+    try {
+      const config = loadConfig();
+      await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+      await waitRandomTime(1000, 2000);
+      logMessage(`✓ Successfully returned to deliveries list (via direct navigation)`);
+      await deliveryItemHandle.dispose();
+      return true;
+    } catch (navError) {
+      logMessage('Failed to return to deliveries list', 'ERROR');
+      await deliveryItemHandle.dispose();
+      return false;
+    }
+  } catch (error: any) {
+    logMessage(`Error clicking delivery ${orderNumber}: ${error.message}`, 'ERROR');
+    return false;
+  }
+}
+
+/**
+ * Ensure we're on the deliveries page, click link if not
+ */
+async function ensureOnDeliveriesPage(page: puppeteer.Page): Promise<boolean> {
+  try {
+    const currentUrl = page.url();
+    
+    if (currentUrl.includes('/deliveries')) {
+      logMessage('Already on deliveries page');
+      return true;
+    }
+    
+    logMessage(`Not on deliveries page (current URL: ${currentUrl}), clicking href="/deliveries" link...`);
+    
+    const deliveriesLink = await page.evaluateHandle(() => {
+      const links = Array.from(document.querySelectorAll('a'));
+      return links.find(link => {
+        const href = link.getAttribute('href');
+        return href === '/deliveries' || href === '/deliveries/';
+      });
+    });
+    
+    const linkValue = await deliveriesLink.jsonValue();
+    if (linkValue) {
+      await page.evaluate((handle) => {
+        const element = handle as HTMLAnchorElement;
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, deliveriesLink);
+      
+      await waitRandomTime(500, 1000);
+      
+      const linkBox = await (deliveriesLink as puppeteer.ElementHandle<HTMLAnchorElement>).boundingBox();
+      if (linkBox) {
+        await page.mouse.move(linkBox.x + linkBox.width / 2, linkBox.y + linkBox.height / 2);
+        await waitRandomTime(500, 1000);
+        await page.mouse.down();
+        await page.mouse.up();
+      } else {
+        await page.evaluate((handle) => {
+          const element = handle as HTMLAnchorElement;
+          if (element) {
+            element.click();
+          }
+        }, deliveriesLink);
+      }
+      
+      await waitRandomTime(1000, 2000);
+      
+      try {
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+      } catch (navError) {
+        logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
+      }
+      
+      await waitRandomTime(1000, 2000);
+      
+      const finalUrl = page.url();
+      if (finalUrl.includes('/deliveries')) {
+        logMessage('✓ Successfully navigated to deliveries page');
+        return true;
+      } else {
+        logMessage(`Failed to navigate to deliveries page, current URL: ${finalUrl}`, 'WARNING');
+        return false;
+      }
+    } else {
+      logMessage('Deliveries link not found, trying direct navigation...', 'WARNING');
+      
+      try {
+        const config = loadConfig();
+        await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+        await waitRandomTime(1000, 2000);
+        
+        const finalUrl = page.url();
+        if (finalUrl.includes('/deliveries')) {
+          logMessage('✓ Successfully navigated to deliveries page (direct navigation)');
+          return true;
+        } else {
+          logMessage(`Failed to navigate to deliveries page via direct navigation`, 'ERROR');
+          return false;
+        }
+      } catch (navError: any) {
+        logMessage(`Error navigating to deliveries page: ${navError.message}`, 'ERROR');
+        return false;
+      }
+    }
+  } catch (error: any) {
+    logMessage(`Error ensuring on deliveries page: ${error.message}`, 'ERROR');
+    return false;
+  }
+}
+
+/**
+ * Load clicked orders from file
+ */
+function loadClickedOrders(): Set<string> {
+  const clickedOrders = new Set<string>();
+  try {
+    const config = loadConfig();
+    const clickedOrdersFile = path.join(config.paths.dataPath, 'clicked_orders.json');
+    
+    if (fileExists(clickedOrdersFile)) {
+      const fileContent = readFileSync(clickedOrdersFile, 'utf-8');
+      const orders = JSON.parse(fileContent) as string[];
+      orders.forEach(order => clickedOrders.add(order));
+      logMessage(`Loaded ${clickedOrders.size} previously clicked orders from file`);
+    }
+  } catch (error: any) {
+    logMessage(`Error loading clicked orders: ${error.message}`, 'WARNING');
+  }
+  return clickedOrders;
+}
+
+/**
+ * Save clicked orders to file
+ */
+function saveClickedOrders(clickedOrders: Set<string>): void {
+  try {
+    const config = loadConfig();
+    mkdirSync(config.paths.dataPath, { recursive: true });
+    
+    const clickedOrdersFile = path.join(config.paths.dataPath, 'clicked_orders.json');
+    const ordersArray = Array.from(clickedOrders);
+    writeFileSync(clickedOrdersFile, JSON.stringify(ordersArray, null, 2), 'utf-8');
+  } catch (error: any) {
+    logMessage(`Error saving clicked orders: ${error.message}`, 'ERROR');
+  }
+}
+
+/**
+ * Add order to clicked orders set and save to file
+ */
+function addClickedOrder(orderNumber: string, clickedOrders: Set<string>): void {
+  clickedOrders.add(orderNumber);
+  saveClickedOrders(clickedOrders);
+  logMessage(`Added order ${orderNumber} to clicked orders list (total: ${clickedOrders.size})`);
+}
+
+/**
+ * Log clicked orders to file
+ */
+function logClickedOrder(orderNumber: string, timeText: string, status: string | null, reason: string): void {
+  try {
+    const config = loadConfig();
+    mkdirSync(config.paths.dataPath, { recursive: true });
+    
+    const timestamp = new Date().toISOString();
+    const logLine = `${timestamp} | Order: ${orderNumber} | Time: ${timeText} | Status: ${status || 'Unknown'} | Reason: ${reason}\n`;
+    
+    const logFilePath = path.join(config.paths.dataPath, 'clicked_orders.log');
+    appendFileSync(logFilePath, logLine, 'utf-8');
+    
+    logMessage(`Logged clicked order ${orderNumber} to file`);
+  } catch (error: any) {
+    logMessage(`Error logging clicked order: ${error.message}`, 'ERROR');
+  }
+}
+
+/**
+ * Check list and click elements - Updated with continuous monitoring logic
  */
 async function checkListAndClick(config: BotConfig): Promise<{ processed: number, clicked: number, error?: string }> {
   const result = { processed: 0, clicked: 0, error: undefined as string | undefined };
@@ -710,7 +1865,11 @@ async function checkListAndClick(config: BotConfig): Promise<{ processed: number
   let browserResult: InitBrowserResult | null = null;
 
   try {
-    logMessage('Starting list check and click task...');
+    logMessage('Starting continuous delivery monitoring task...');
+
+    // Load previously clicked orders to ensure each order is clicked only once
+    const clickedOrders = loadClickedOrders();
+    logMessage(`Loaded ${clickedOrders.size} previously clicked orders`);
 
     browserResult = await initBrowser(config.task.url, 'default');
 
@@ -723,68 +1882,151 @@ async function checkListAndClick(config: BotConfig): Promise<{ processed: number
     const page = browserResult.page;
 
     logMessage('Waiting for page to load...');
-    await waitRandomTime(2000, 3000);
+    await waitRandomTime(1000, 2000);
 
-    // Wait for list selector to appear
-    logMessage(`Waiting for list selector: ${config.task.listSelector}`);
-    try {
-      await page.waitForSelector(config.task.listSelector, { timeout: 10000 });
-      logMessage('List selector found');
-    } catch (error) {
-      result.error = `List selector not found: ${config.task.listSelector}`;
-      logMessage(result.error, 'ERROR');
-
-      // Take screenshot for debugging
-      const screenshotPath = path.join(config.paths.dataPath, `error_${Date.now()}.png`);
-      mkdirSync(config.paths.dataPath, { recursive: true });
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      await sendImageToTelegram(screenshotPath, `Error: List selector not found`);
-
-      return result;
+    // Check for "No Deliveries available"
+    const hasNoDeliveries = await checkNoDeliveries(page);
+    if (hasNoDeliveries) {
+      logMessage('"No Deliveries available" detected, reloading page...');
+      await page.reload({ waitUntil: 'networkidle2' });
+      await waitRandomTime(1000, 2000);
     }
 
-    // Get list items
-    const listItems = await page.$$(config.task.listSelector);
-    logMessage(`Found ${listItems.length} items in list`);
-
-    const maxItems = config.task.maxItemsPerCycle || listItems.length;
-    const itemsToProcess = listItems.slice(0, maxItems);
-    result.processed = itemsToProcess.length;
-
-    // Process each item
-    for (let i = 0; i < itemsToProcess.length; i++) {
-      try {
-        logMessage(`Processing item ${i + 1}/${itemsToProcess.length}`);
-
-        // Try to click on each click selector within the item
-        for (const clickSelector of config.task.clickSelectors) {
-          try {
-            // Find the clickable element within the current list item
-            const clickableElement = await itemsToProcess[i].$(clickSelector);
-
-            if (clickableElement) {
-              logMessage(`Clicking element with selector: ${clickSelector}`);
-              await clickableElement.click();
-              result.clicked++;
-              await waitRandomTime(1000, 2000);
-              break; // Only click one element per item
-            }
-          } catch (clickError) {
-            logMessage(`Error clicking selector ${clickSelector}: ${clickError}`, 'WARNING');
-          }
-        }
-
-        await waitRandomTime(500, 1000);
-      } catch (itemError) {
-        logMessage(`Error processing item ${i + 1}: ${itemError}`, 'ERROR');
+    // Check for expired link
+    const isExpired = await checkExpired(page);
+    if (isExpired) {
+      logMessage('Expired link detected, requesting new link...');
+      if (config.task.phoneNumber) {
+        await requestNewLink(page, config.task.phoneNumber);
+        await waitRandomTime(1000, 2000);
       }
     }
 
-    logMessage(`Task completed. Processed: ${result.processed}, Clicked: ${result.clicked}`);
+    // Ensure we're on the deliveries page before processing orders
+    const onDeliveriesPage = await ensureOnDeliveriesPage(page);
+    if (!onDeliveriesPage) {
+      result.error = 'Could not navigate to deliveries page';
+      logMessage(result.error, 'WARNING');
+      return result;
+    }
+
+    // Process deliveries - this processes ALL orders in "Today" section
+    const deliveries = await processContinuousDeliveries(page);
+
+    logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) in "Today" section`);
+
+    result.processed = deliveries.length;
+
+    // Separate orders into categories
+    const eligibleToClick = deliveries.filter(d => d.shouldClick);
+    const notEligible = deliveries.filter(d => !d.shouldClick);
+
+    logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
+    logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
+
+    // IMPORTANT: Process eligible orders, but skip orders that have already been clicked
+    // Also limit to 1 click per cycle
+    let clickedCount = 0;
+    let failedCount = 0;
+    let skippedAlreadyClicked = 0;
+
+    for (let i = 0; i < eligibleToClick.length; i++) {
+      const delivery = eligibleToClick[i];
+      logMessage(`\n>>> Processing order ${i + 1}/${eligibleToClick.length}: ${delivery.orderNumber} <<<`);
+
+      // Check if this order has already been clicked
+      if (clickedOrders.has(delivery.orderNumber)) {
+        logMessage(`  ⚠ Order ${delivery.orderNumber} has already been clicked previously. Skipping.`);
+        skippedAlreadyClicked++;
+        continue;
+      }
+
+      try {
+        // Determine if full process is needed based on actionType
+        // param2 = only "I'm on my way", param1 and rule3 = full process
+        const fullProcess = delivery.actionType !== 'param2';
+        const actionTypeDesc = delivery.actionType === 'param2' ? 'param2 (only "I\'m on my way")' : 
+                               delivery.actionType === 'param1' ? 'param1 (full process)' :
+                               delivery.actionType === 'rule3' ? 'rule3 (full process)' : 'unknown';
+        logMessage(`  Action type: ${actionTypeDesc}`);
+
+        const success = await clickDeliveryAndReturn(page, delivery.orderNumber, fullProcess);
+
+        if (success) {
+          // Add order to clicked orders set and save to file
+          addClickedOrder(delivery.orderNumber, clickedOrders);
+          logClickedOrder(delivery.orderNumber, delivery.timeText, delivery.status, delivery.reason);
+          logMessage(`✓ Successfully clicked order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`);
+          clickedCount++;
+          result.clicked = clickedCount;
+
+          // Limit: Only 1 click per cycle - stop processing after first successful click
+          logMessage(`  Limit reached: 1 click per cycle. Stopping processing for this cycle.`);
+          break;
+
+          // Verify we're back on the deliveries list before continuing
+          const currentUrl = page.url();
+          if (!currentUrl.includes('/deliveries')) {
+            logMessage('Not on deliveries page after return, navigating back...', 'WARNING');
+            try {
+              await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+              await waitRandomTime(1000, 2000);
+            } catch (navError) {
+              logMessage('Failed to navigate back to deliveries page, but continuing with next order...', 'WARNING');
+            }
+          }
+
+          await waitRandomTime(500, 1000);
+        } else {
+          logMessage(`✗ Failed to click order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`, 'ERROR');
+          failedCount++;
+
+          // Even if click failed, try to ensure we're on deliveries page
+          const currentUrl = page.url();
+          if (!currentUrl.includes('/deliveries')) {
+            logMessage('Not on deliveries page after failed click, navigating back...', 'WARNING');
+            try {
+              await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+              await waitRandomTime(1000, 2000);
+            } catch (navError) {
+              logMessage('Failed to navigate back to deliveries page, but continuing with next order...', 'WARNING');
+            }
+          }
+
+          await waitRandomTime(500, 1000);
+        }
+      } catch (error: any) {
+        logMessage(`✗ Error processing order ${delivery.orderNumber}: ${error.message}`, 'ERROR');
+        failedCount++;
+
+        // Try to get back to deliveries page
+        try {
+          const currentUrl = page.url();
+          if (!currentUrl.includes('/deliveries')) {
+            await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+            await waitRandomTime(1000, 2000);
+          }
+        } catch (recoveryError) {
+          logMessage('Could not recover to deliveries page, but continuing...', 'WARNING');
+        }
+
+        await waitRandomTime(500, 1000);
+      }
+    }
+
+    // Log final summary of this cycle
+    logMessage(`\n📊 Cycle processing complete:`);
+    logMessage(`  - Total orders reviewed: ${deliveries.length}`);
+    logMessage(`  - Successfully clicked: ${clickedCount}`);
+    logMessage(`  - Failed clicks: ${failedCount}`);
+    logMessage(`  - Already clicked (skipped): ${skippedAlreadyClicked}`);
+    logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
+
+    result.clicked = clickedCount;
 
   } catch (error: any) {
     result.error = (error as Error).message;
-    logMessage('Error during list check and click: ' + error, 'ERROR');
+    logMessage('Error during continuous delivery monitoring: ' + error, 'ERROR');
   } finally {
     if (browserResult?.browser) {
       try {

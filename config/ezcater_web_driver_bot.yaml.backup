@@ -1,0 +1,75 @@
+# EZCater Web Driver Bot Configuration
+# Backup created on: 2025-01-22
+
+browser:
+  # Chrome executable path
+  # If the path below doesn't exist, the system will try to auto-detect Chrome
+  # Windows examples:
+  #   - "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  #   - "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+  # Linux examples:
+  #   - "/usr/bin/google-chrome"
+  #   - "/usr/bin/google-chrome-stable"
+  #   - "/usr/bin/chromium"
+  # macOS examples:
+  #   - "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  _executablePath: "/usr/local/bin/google-chrome-container"
+  executablePath: "/usr/bin/google-chrome"  # Will auto-detect if this path doesn't exist
+  # User data directory for chrome profile
+  userDataPath: "./browsers/{__context__}/chrome_profile_{__instance__}"
+  # Timer configuration for browser management
+  checkBrowserInterval: 80 # Seconds between browser age checks
+  browserAge: 30 # Maximum browser age in seconds
+  # Browser pool size
+  poolSize: 3
+  # Browser launch arguments
+  args:
+    - "--restore-last-session"
+    - "--disable-blink-features=AutomationControlled"
+    - "--window-size=1920,1080"
+    - "--start-maximized"
+    - "--disable-session-crashed-bubble" # Prevents the "Chrome didn't shut down correctly" message
+    - "--disable-infobars" # Prevents infobars like "Chrome is being controlled"
+    - "--no-default-browser-check" # Prevents checking if Chrome is the default browser
+
+# Page viewport configuration
+viewport:
+  width: 1920
+  height: 10080
+
+# Task configuration
+task:
+  # URL to check
+  url: "https://dm.ezcater.com/s/eo93lrew2v"
+  # Interval in seconds between checks
+  checkInterval: 60
+  # Phone number for requesting new delivery links when expired
+  phoneNumber: "1-786-220-1484"
+  # Maximum number of reload attempts for "No Deliveries available"
+  maxReloadAttempts: 3
+  # Wait time between reloads (seconds)
+  reloadWaitTime: 5
+
+paths:
+  # File to store PID
+  pidFile: "./browsers/chrome/pid.txt"
+  # Directory for storing task data/logs
+  dataPath: "./data"
+
+server:
+  basePath: /api/
+  port: 3000
+
+cleanup:
+  days: 10
+
+tokens:
+  - token: f47ac10b-58cc-4372-a567-0e02b2c3d479
+    role: admin
+    description: Default admin token
+  - token: 550e8400-e29b-41d4-a716-446655440000
+    role: admin
+    description: Development token
+  - token: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+    role: admin
+    description: Testing token

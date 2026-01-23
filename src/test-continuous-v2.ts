@@ -717,7 +717,7 @@ async function getDeliveryStatusFromPage(page: puppeteer.Page, orderNumber: stri
 /**
  * Process delivery orders with continuous monitoring logic
  */
-async function processContinuousDeliveries(page: puppeteer.Page, clickedOrders: Set<string>): Promise<Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>> {
+async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>> {
   const results: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }> = [];
   
   try {
@@ -903,19 +903,6 @@ async function processContinuousDeliveries(page: puppeteer.Page, clickedOrders: 
       
       logMessage(`Reviewing order ${i + 1}/${deliveryData.length}: ${delivery.orderNumber} (${delivery.timeText})`);
       
-      // Skip if already clicked
-      if (clickedOrders.has(delivery.orderNumber)) {
-        logMessage(`  Order ${delivery.orderNumber} already clicked, skipping`);
-        results.push({
-          orderNumber: delivery.orderNumber,
-          timeText: delivery.timeText,
-          status: null,
-          shouldClick: false,
-          reason: 'Already clicked',
-          actionType: null
-        });
-        continue;
-      }
       
       try {
         // Parse delivery time
@@ -1094,69 +1081,176 @@ async function processContinuousDeliveries(page: puppeteer.Page, clickedOrders: 
 }
 
 /**
- * Log button click action (no actual click performed)
+ * Click a button by its text content
  * Based on test.js and test (1).js implementations
+ * For "Delivery is done" button, uses specific selector: div.ez-7xofcs > button
  */
 async function clickButtonByText(page: puppeteer.Page, buttonText: string, timeout: number = 10000): Promise<boolean> {
   try {
     logMessage(`  Looking for button: "${buttonText}"`);
     
+    // Special handling for "I'm on my way" button with specific selector
+    if (buttonText === "I'm on my way") {
+      try {
+        // Wait for the specific container and button
+        await page.waitForSelector('div.ez-7xofcs button', { timeout });
+        
+        // Get the button handle using the specific selector
+        const btnHandle = await page.evaluateHandle(() => {
+          const container = document.querySelector('div.ez-7xofcs');
+          if (container) {
+            const button = container.querySelector('button');
+            if (button && button.textContent?.trim() === "I'm on my way") {
+              return button as HTMLButtonElement;
+            }
+          }
+          return null;
+        });
+        
+        const btnValue = await btnHandle.jsonValue();
+        if (btnValue) {
+          // Get the bounding box
+          const box = await (btnHandle as puppeteerTypes.ElementHandle<HTMLButtonElement>).boundingBox();
+          
+          if (box) {
+            // Natural pause before clicking
+            await waitRandomTime(1000, 1500);
+            
+            // Move mouse and click
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await waitRandomTime(500, 1000);
+            await page.mouse.down();
+            await page.mouse.up();
+            
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (using specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          } else {
+            // Fallback: click directly
+            await page.evaluate((handle) => {
+              const element = handle as HTMLButtonElement;
+              if (element) {
+                element.click();
+              }
+            }, btnHandle);
+            
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method, specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          }
+        }
+      } catch (specificError: any) {
+        logMessage(`  Specific selector for "I'm on my way" failed, trying generic method...`, 'WARNING');
+        // Fall through to generic method below
+      }
+    }
+    
+    // Special handling for "Delivery is done" button with specific selector
+    if (buttonText === "Delivery is done") {
+      try {
+        // Wait for the specific container and button
+        await page.waitForSelector('div.ez-7xofcs button', { timeout });
+        
+        // Get the button handle using the specific selector
+        const btnHandle = await page.evaluateHandle(() => {
+          const container = document.querySelector('div.ez-7xofcs');
+          if (container) {
+            const button = container.querySelector('button');
+            if (button && button.textContent?.trim() === 'Delivery is done') {
+              return button as HTMLButtonElement;
+            }
+          }
+          return null;
+        });
+        
+        const btnValue = await btnHandle.jsonValue();
+        if (btnValue) {
+          // Get the bounding box
+          const box = await (btnHandle as puppeteerTypes.ElementHandle<HTMLButtonElement>).boundingBox();
+          
+          if (box) {
+            // Natural pause before clicking
+            await waitRandomTime(1000, 1500);
+            
+            // Move mouse and click
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await waitRandomTime(500, 1000);
+            await page.mouse.down();
+            await page.mouse.up();
+            
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (using specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          } else {
+            // Fallback: click directly
+            await page.evaluate((handle) => {
+              const element = handle as HTMLButtonElement;
+              if (element) {
+                element.click();
+              }
+            }, btnHandle);
+            
+            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method, specific selector)`);
+            await btnHandle.dispose();
+            return true;
+          }
+        }
+      } catch (specificError: any) {
+        logMessage(`  Specific selector for "Delivery is done" failed, trying generic method...`, 'WARNING');
+        // Fall through to generic method below
+      }
+    }
+    
+    // Generic method for all buttons (including fallback for "Delivery is done")
     // Wait for button to appear
     await page.waitForFunction((text) => {
       return Array.from(document.querySelectorAll('button'))
         .some(btn => btn.textContent?.trim() === text);
     }, { timeout }, buttonText);
     
-    // Get button information for logging
-    const buttonInfo = await page.evaluate((text) => {
-      const button = Array.from(document.querySelectorAll('button'))
-        .find(btn => btn.textContent?.trim() === text) as HTMLButtonElement | undefined;
-      
-      if (!button) {
-        return null;
-      }
-      
-      // Get button details
-      const rect = button.getBoundingClientRect();
-      const classes = button.className || '';
-      const id = button.id || '';
-      const dataTestId = button.getAttribute('data-testid') || '';
-      
-      return {
-        text: button.textContent?.trim() || '',
-        tagName: button.tagName,
-        className: classes,
-        id: id,
-        dataTestId: dataTestId,
-        position: {
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height)
-        },
-        outerHTML: button.outerHTML.substring(0, 200) // First 200 chars of HTML
-      };
+    // Get the button handle
+    const btnHandle = await page.evaluateHandle((text) => {
+      return Array.from(document.querySelectorAll('button'))
+        .find(btn => btn.textContent?.trim() === text);
     }, buttonText);
     
-    if (!buttonInfo) {
+    const btnValue = await btnHandle.jsonValue();
+    if (!btnValue) {
       logMessage(`  Button "${buttonText}" not found`, 'WARNING');
       return false;
     }
     
-    // Log the button that would be clicked
-    logMessage(`  [LOG ONLY] Would click button: "${buttonText}"`);
-    logMessage(`  [LOG ONLY] Button element details:`);
-    logMessage(`    - Tag: ${buttonInfo.tagName}`);
-    logMessage(`    - Text: "${buttonInfo.text}"`);
-    if (buttonInfo.id) logMessage(`    - ID: ${buttonInfo.id}`);
-    if (buttonInfo.dataTestId) logMessage(`    - data-testid: ${buttonInfo.dataTestId}`);
-    if (buttonInfo.className) logMessage(`    - Classes: ${buttonInfo.className}`);
-    logMessage(`    - Position: x=${buttonInfo.position.x}, y=${buttonInfo.position.y}, width=${buttonInfo.position.width}, height=${buttonInfo.position.height}`);
-    logMessage(`    - HTML: ${buttonInfo.outerHTML}...`);
+    // Get the bounding box
+    const box = await (btnHandle as puppeteerTypes.ElementHandle<HTMLButtonElement>).boundingBox();
     
-    return true;
+    if (box) {
+      // Natural pause before clicking
+      await waitRandomTime(1000, 1500);
+      
+      // Move mouse and click
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await waitRandomTime(500, 1000);
+      await page.mouse.down();
+      await page.mouse.up();
+      
+      logMessage(`  ✓ Successfully clicked button: "${buttonText}"`);
+      await btnHandle.dispose();
+      return true;
+    } else {
+      // Fallback: click directly
+      await page.evaluate((handle) => {
+        const element = handle as HTMLButtonElement;
+        if (element) {
+          element.click();
+        }
+      }, btnHandle);
+      
+      logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method)`);
+      await btnHandle.dispose();
+      return true;
+    }
   } catch (error: any) {
-    logMessage(`  ✗ Error finding button "${buttonText}": ${error.message}`, 'WARNING');
+    logMessage(`  ✗ Error clicking button "${buttonText}": ${error.message}`, 'WARNING');
     return false;
   }
 }
@@ -1183,121 +1277,227 @@ async function waitForOrderTicket(page: puppeteer.Page, orderNumber: string, tim
 }
 
 /**
- * Log button actions on order page (no actual clicks performed)
+ * Perform button actions on order page
  * Based on test.js and test (1).js implementations
- * @param fullProcess - If true, logs full process (I'm on my way, Delivery is done, Confirm)
- *                      If false, only logs "I'm on my way"
+ * @param fullProcess - If true, performs full process (I'm on my way, Delivery is done, Confirm)
+ *                      If false, only clicks "I'm on my way"
  */
 async function performOrderActions(page: puppeteer.Page, orderNumber: string, fullProcess: boolean = true): Promise<boolean> {
   try {
-    logMessage(`  [LOG ONLY] Performing actions for order ${orderNumber}...`);
-    logMessage(`  [LOG ONLY] Action type: ${fullProcess ? 'Full process' : 'Only "I\'m on my way"'}`);
+    logMessage(`  Performing actions for order ${orderNumber}...`);
+    logMessage(`  Action type: ${fullProcess ? 'Full process' : 'Only "I\'m on my way"'}`);
     
     // Wait for order ticket to appear
     await waitForOrderTicket(page, orderNumber);
     
-    // Step 1: Log "I'm on my way" button (always required)
+    // Step 1: Click "I'm on my way" button (always required)
     const onMyWayClicked = await clickButtonByText(page, "I'm on my way");
     if (!onMyWayClicked) {
-      logMessage(`  [LOG ONLY] Could not find "I'm on my way" button, continuing anyway...`, 'WARNING');
+      logMessage(`  Could not click "I'm on my way" button, continuing anyway...`, 'WARNING');
     }
     
     // If only param2 (not full process), stop here
     if (!fullProcess) {
-      logMessage(`  [LOG ONLY] ✓ Completed logging actions for order ${orderNumber} (param2 - only "I'm on my way")`);
+      logMessage(`  ✓ Completed actions for order ${orderNumber} (param2 - only "I'm on my way")`);
       return true;
     }
     
-    // Step 2: Log "Delivery is done" button (if it exists) - only for full process
+    // Wait for page to update after first button click
+    await waitRandomTime(500, 1000);
+    
+    // Step 2: Try to click "Delivery is done" button (if it exists) - only for full process
     const deliveryDoneClicked = await clickButtonByText(page, "Delivery is done", 5000);
     if (deliveryDoneClicked) {
-      logMessage(`  [LOG ONLY] ✓ Would click "Delivery is done" button`);
+      logMessage(`  ✓ Clicked "Delivery is done" button`);
+      // Wait for page to update
+      await waitRandomTime(2000, 3000);
     } else {
-      logMessage(`  [LOG ONLY] "Delivery is done" button not found (may not be available for this order)`, 'INFO');
+      logMessage(`  "Delivery is done" button not found (may not be available for this order)`, 'INFO');
     }
     
-    // Step 3: Log "Confirm" button (if it exists) - only for full process
+    // Step 3: Try to click "Confirm" button (if it exists) - only for full process
     const confirmClicked = await clickButtonByText(page, "Confirm", 5000);
     if (confirmClicked) {
-      logMessage(`  [LOG ONLY] ✓ Would click "Confirm" button`);
+      logMessage(`  ✓ Clicked "Confirm" button`);
+      // Wait for page to update
+      await waitRandomTime(2000, 3000);
     } else {
-      logMessage(`  [LOG ONLY] "Confirm" button not found (may not be available for this order)`, 'INFO');
+      logMessage(`  "Confirm" button not found (may not be available for this order)`, 'INFO');
     }
     
-    logMessage(`  [LOG ONLY] ✓ Completed logging actions for order ${orderNumber} (full process)`);
+    logMessage(`  ✓ Completed actions for order ${orderNumber} (full process)`);
     return true;
   } catch (error: any) {
-    logMessage(`  ✗ Error logging actions for order ${orderNumber}: ${error.message}`, 'ERROR');
+    logMessage(`  ✗ Error performing actions for order ${orderNumber}: ${error.message}`, 'ERROR');
     return false;
   }
 }
 
 /**
- * Log clicking on a delivery order and button actions (no actual clicks performed)
- * @param fullProcess - If true, logs full process (I'm on my way, Delivery is done, Confirm)
- *                      If false, only logs "I'm on my way" (for param2 orders)
+ * Click on a delivery order, perform button actions, and return to list
+ * @param fullProcess - If true, performs full process (I'm on my way, Delivery is done, Confirm)
+ *                      If false, only clicks "I'm on my way" (for param2 orders)
  */
 async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string, fullProcess: boolean = true): Promise<boolean> {
   try {
-    logMessage(`[LOG ONLY] Would click on order ${orderNumber}...`);
+    logMessage(`Clicking on order ${orderNumber}...`);
     
-    // Find the delivery item and get its details
-    const deliveryItemInfo = await page.evaluate((orderNum) => {
+    // Find the delivery item
+    let deliveryItemHandle = await page.evaluateHandle((orderNum) => {
       const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
       for (const container of allDeliveryContainers) {
         const orderDiv = container.querySelector('div.ez-7crqac');
         if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
-          const rect = container.getBoundingClientRect();
-          const classes = container.className || '';
-          const id = container.id || '';
-          const dataTestId = container.getAttribute('data-testid') || '';
-          
-          return {
-            found: true,
-            orderNumber: orderNum,
-            tagName: container.tagName,
-            className: classes,
-            id: id,
-            dataTestId: dataTestId,
-            position: {
-              x: Math.round(rect.x),
-              y: Math.round(rect.y),
-              width: Math.round(rect.width),
-              height: Math.round(rect.height)
-            },
-            outerHTML: container.outerHTML.substring(0, 300) // First 300 chars of HTML
-          };
+          return container as HTMLElement;
         }
       }
-      return { found: false };
+      return null;
     }, orderNumber);
     
-    if (!deliveryItemInfo.found) {
-      logMessage(`[LOG ONLY] Could not find delivery item for order ${orderNumber}`, 'ERROR');
+    const itemValue = await deliveryItemHandle.jsonValue();
+    if (!itemValue) {
+      logMessage(`Could not find delivery item for order ${orderNumber}`, 'ERROR');
       return false;
     }
     
-    // Log the delivery item that would be clicked
-    logMessage(`[LOG ONLY] Delivery item element details:`);
-    logMessage(`  - Order: ${orderNumber}`);
-    logMessage(`  - Tag: ${deliveryItemInfo.tagName}`);
-    if (deliveryItemInfo.id) logMessage(`  - ID: ${deliveryItemInfo.id}`);
-    if (deliveryItemInfo.dataTestId) logMessage(`  - data-testid: ${deliveryItemInfo.dataTestId}`);
-    if (deliveryItemInfo.className) logMessage(`  - Classes: ${deliveryItemInfo.className}`);
-    if (deliveryItemInfo.position) {
-      logMessage(`  - Position: x=${deliveryItemInfo.position.x}, y=${deliveryItemInfo.position.y}, width=${deliveryItemInfo.position.width}, height=${deliveryItemInfo.position.height}`);
+    // Click the element
+    const box = await (deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>).boundingBox();
+    if (box) {
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await waitRandomTime(500, 1000);
+      await page.mouse.down();
+      await page.mouse.up();
+    } else {
+      await page.evaluate((handle) => {
+        const element = handle as HTMLElement;
+        if (element) {
+          element.click();
+        }
+      }, deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>);
     }
-    logMessage(`  - HTML: ${deliveryItemInfo.outerHTML}...`);
     
-    logMessage(`[LOG ONLY] Would navigate to order details page`);
+    await waitRandomTime(1000, 2000);
     
-    // Log button actions (no actual navigation needed since we're just logging)
+    // Wait for navigation
+    try {
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    } catch (navError) {
+      logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
+    }
+    
+    await waitRandomTime(1000, 2000);
+    
+    // Check if navigation was successful
+    const currentUrl = page.url();
+    if (currentUrl.includes('/deliveries')) {
+      logMessage(`Navigation failed, still on deliveries page`, 'WARNING');
+      await deliveryItemHandle.dispose();
+      return false;
+    }
+    
+    logMessage(`Successfully navigated to order details`);
+    
+    // Perform button actions on the order page
     await performOrderActions(page, orderNumber, fullProcess);
     
-    logMessage(`[LOG ONLY] Would return to deliveries list`);
-    logMessage(`[LOG ONLY] ✓ Completed logging for order ${orderNumber}`);
+    // Return to deliveries list
+    logMessage(`Returning to deliveries list...`);
     
-    return true;
+    // Check if we're already on deliveries page
+    const currentUrlBeforeReturn = page.url();
+    if (currentUrlBeforeReturn.includes('/deliveries')) {
+      logMessage(`Already on deliveries page, no need to click link`);
+      await deliveryItemHandle.dispose();
+      return true;
+    }
+    
+    const deliveriesLink = await page.evaluateHandle(() => {
+      const links = Array.from(document.querySelectorAll('a'));
+      return links.find(link => {
+        const href = link.getAttribute('href');
+        return href === '/deliveries' || href === '/deliveries/';
+      });
+    });
+    
+    const linkValue = await deliveriesLink.jsonValue();
+    if (linkValue) {
+      // Scroll to link
+      await page.evaluate((handle) => {
+        const element = handle as HTMLAnchorElement;
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, deliveriesLink);
+      
+      await waitRandomTime(500, 1000);
+      
+      const linkBox = await (deliveriesLink as puppeteerTypes.ElementHandle<HTMLAnchorElement>).boundingBox();
+      if (linkBox) {
+        await page.mouse.move(linkBox.x + linkBox.width / 2, linkBox.y + linkBox.height / 2);
+        await waitRandomTime(500, 1000);
+        await page.mouse.down();
+        await page.mouse.up();
+      } else {
+        await page.evaluate((handle) => {
+          const element = handle as HTMLAnchorElement;
+          if (element) {
+            element.click();
+          }
+        }, deliveriesLink);
+      }
+      
+      await waitRandomTime(1000, 2000);
+      
+      try {
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+      } catch (navError) {
+        logMessage('Navigation back may have completed or timed out, continuing...', 'WARNING');
+      }
+      
+      await waitRandomTime(1000, 2000);
+      
+      // Verify we're back on deliveries page
+      const finalUrl = page.url();
+      if (finalUrl.includes('/deliveries')) {
+        logMessage(`✓ Successfully returned to deliveries list`);
+        await deliveryItemHandle.dispose();
+        return true;
+      } else {
+        logMessage('Not on deliveries page after clicking link, trying alternative methods...', 'WARNING');
+      }
+    } else {
+      logMessage('Deliveries link not found, trying to navigate back', 'WARNING');
+    }
+    
+    // Fallback: try to go back or navigate directly
+    try {
+      await page.goBack();
+      await waitRandomTime(1000, 2000);
+      
+      // Verify we're on deliveries page
+      const finalUrl = page.url();
+      if (finalUrl.includes('/deliveries')) {
+        logMessage(`✓ Successfully returned to deliveries list (via goBack)`);
+        await deliveryItemHandle.dispose();
+        return true;
+      }
+    } catch (backError) {
+      logMessage('goBack failed, trying direct navigation...', 'WARNING');
+    }
+    
+    // Last resort: navigate directly to deliveries URL
+    try {
+      const config = loadConfig();
+      await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+      await waitRandomTime(1000, 2000);
+      logMessage(`✓ Successfully returned to deliveries list (via direct navigation)`);
+      await deliveryItemHandle.dispose();
+      return true;
+    } catch (navError) {
+      logMessage('Failed to return to deliveries list', 'ERROR');
+      await deliveryItemHandle.dispose();
+      return false;
+    }
   } catch (error: any) {
     logMessage(`Error clicking delivery ${orderNumber}: ${error.message}`, 'ERROR');
     return false;
@@ -1428,8 +1628,6 @@ async function testContinuous(): Promise<void> {
   const config = loadConfig();
   browserPool = new BrowserPool(config);
   
-  const clickedOrders = new Set<string>();
-  
   logMessage('Starting continuous delivery monitoring with button actions...');
   logMessage(`Check interval: 60 seconds (1 minute)`);
   
@@ -1479,20 +1677,18 @@ async function testContinuous(): Promise<void> {
       }
       
       // Process deliveries - this processes ALL orders in "Today" section
-      const deliveries = await processContinuousDeliveries(page, clickedOrders);
+      const deliveries = await processContinuousDeliveries(page);
       
       logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) in "Today" section`);
       
       // Separate orders into categories
-      const eligibleToClick = deliveries.filter(d => d.shouldClick && !clickedOrders.has(d.orderNumber));
-      const alreadyClicked = deliveries.filter(d => clickedOrders.has(d.orderNumber));
+      const eligibleToClick = deliveries.filter(d => d.shouldClick);
       const notEligible = deliveries.filter(d => !d.shouldClick);
       
       logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
-      logMessage(`  - Already clicked: ${alreadyClicked.length}`);
       logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
       
-      // IMPORTANT: Process ALL eligible orders, even if some fail
+      // IMPORTANT: Process eligible orders, but limit to 1 click per cycle
       let clickedCount = 0;
       let failedCount = 0;
       
@@ -1501,13 +1697,24 @@ async function testContinuous(): Promise<void> {
         logMessage(`\n>>> Processing order ${i + 1}/${eligibleToClick.length}: ${delivery.orderNumber} <<<`);
         
         try {
-          const success = await clickDeliveryAndReturn(page, delivery.orderNumber);
+          // Determine if full process is needed based on actionType
+          // param2 = only "I'm on my way", param1 and rule3 = full process
+          const fullProcess = delivery.actionType !== 'param2';
+          const actionTypeDesc = delivery.actionType === 'param2' ? 'param2 (only "I\'m on my way")' : 
+                                 delivery.actionType === 'param1' ? 'param1 (full process)' :
+                                 delivery.actionType === 'rule3' ? 'rule3 (full process)' : 'unknown';
+          logMessage(`  Action type: ${actionTypeDesc}`);
+          
+          const success = await clickDeliveryAndReturn(page, delivery.orderNumber, fullProcess);
           
           if (success) {
-            clickedOrders.add(delivery.orderNumber);
             logClickedOrder(delivery.orderNumber, delivery.timeText, delivery.status, delivery.reason);
             logMessage(`✓ Successfully clicked order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`);
             clickedCount++;
+            
+            // Limit: Only 1 click per cycle - stop processing after first successful click
+            logMessage(`  Limit reached: 1 click per cycle. Stopping processing for this cycle.`);
+            break;
             
             // Verify we're back on the deliveries list before continuing
             const currentUrl = page.url();
@@ -1570,11 +1777,9 @@ async function testContinuous(): Promise<void> {
       logMessage(`  - Total orders reviewed: ${deliveries.length}`);
       logMessage(`  - Successfully clicked: ${clickedCount}`);
       logMessage(`  - Failed clicks: ${failedCount}`);
-      logMessage(`  - Already clicked (skipped): ${alreadyClicked.length}`);
       logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
       
       logMessage(`\n=== Check cycle completed ===`);
-      logMessage(`Total orders clicked so far: ${clickedOrders.size}`);
       logMessage(`Waiting 60 seconds before next check...`);
       
       // Wait 60 seconds (1 minute) before next check
