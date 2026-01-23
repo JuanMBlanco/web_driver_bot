@@ -1116,25 +1116,25 @@ async function clickButtonByText(page: puppeteer.Page, buttonText: string, timeo
             // Natural pause before clicking
             await waitRandomTime(1000, 1500);
             
-            // Move mouse and click
-            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-            await waitRandomTime(500, 1000);
-            await page.mouse.down();
-            await page.mouse.up();
+            // TEMPORARILY COMMENTED: Move mouse and click
+            // await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            // await waitRandomTime(500, 1000);
+            // await page.mouse.down();
+            // await page.mouse.up();
             
-            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (using specific selector)`);
+            logMessage(`  [TEMPORARILY DISABLED] Would click button: "${buttonText}" (using specific selector) at position (${box.x + box.width / 2}, ${box.y + box.height / 2})`);
             await btnHandle.dispose();
             return true;
           } else {
-            // Fallback: click directly
-            await page.evaluate((handle) => {
-              const element = handle as HTMLButtonElement;
-              if (element) {
-                element.click();
-              }
-            }, btnHandle);
+            // TEMPORARILY COMMENTED: Fallback: click directly
+            // await page.evaluate((handle) => {
+            //   const element = handle as HTMLButtonElement;
+            //   if (element) {
+            //     element.click();
+            //   }
+            // }, btnHandle);
             
-            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method, specific selector)`);
+            logMessage(`  [TEMPORARILY DISABLED] Would click button: "${buttonText}" (fallback method, specific selector)`);
             await btnHandle.dispose();
             return true;
           }
@@ -1172,25 +1172,25 @@ async function clickButtonByText(page: puppeteer.Page, buttonText: string, timeo
             // Natural pause before clicking
             await waitRandomTime(1000, 1500);
             
-            // Move mouse and click
-            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-            await waitRandomTime(500, 1000);
-            await page.mouse.down();
-            await page.mouse.up();
+            // TEMPORARILY COMMENTED: Move mouse and click
+            // await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            // await waitRandomTime(500, 1000);
+            // await page.mouse.down();
+            // await page.mouse.up();
             
-            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (using specific selector)`);
+            logMessage(`  [TEMPORARILY DISABLED] Would click button: "${buttonText}" (using specific selector) at position (${box.x + box.width / 2}, ${box.y + box.height / 2})`);
             await btnHandle.dispose();
             return true;
           } else {
-            // Fallback: click directly
-            await page.evaluate((handle) => {
-              const element = handle as HTMLButtonElement;
-              if (element) {
-                element.click();
-              }
-            }, btnHandle);
+            // TEMPORARILY COMMENTED: Fallback: click directly
+            // await page.evaluate((handle) => {
+            //   const element = handle as HTMLButtonElement;
+            //   if (element) {
+            //     element.click();
+            //   }
+            // }, btnHandle);
             
-            logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method, specific selector)`);
+            logMessage(`  [TEMPORARILY DISABLED] Would click button: "${buttonText}" (fallback method, specific selector)`);
             await btnHandle.dispose();
             return true;
           }
@@ -1227,25 +1227,25 @@ async function clickButtonByText(page: puppeteer.Page, buttonText: string, timeo
       // Natural pause before clicking
       await waitRandomTime(1000, 1500);
       
-      // Move mouse and click
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      await waitRandomTime(500, 1000);
-      await page.mouse.down();
-      await page.mouse.up();
+      // TEMPORARILY COMMENTED: Move mouse and click
+      // await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      // await waitRandomTime(500, 1000);
+      // await page.mouse.down();
+      // await page.mouse.up();
       
-      logMessage(`  ✓ Successfully clicked button: "${buttonText}"`);
+      logMessage(`  [TEMPORARILY DISABLED] Would click button: "${buttonText}" at position (${box.x + box.width / 2}, ${box.y + box.height / 2})`);
       await btnHandle.dispose();
       return true;
     } else {
-      // Fallback: click directly
-      await page.evaluate((handle) => {
-        const element = handle as HTMLButtonElement;
-        if (element) {
-          element.click();
-        }
-      }, btnHandle);
+      // TEMPORARILY COMMENTED: Fallback: click directly
+      // await page.evaluate((handle) => {
+      //   const element = handle as HTMLButtonElement;
+      //   if (element) {
+      //     element.click();
+      //   }
+      // }, btnHandle);
       
-      logMessage(`  ✓ Successfully clicked button: "${buttonText}" (fallback method)`);
+      logMessage(`  [TEMPORARILY DISABLED] Would click button: "${buttonText}" (fallback method)`);
       await btnHandle.dispose();
       return true;
     }
@@ -1360,42 +1360,46 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
       return false;
     }
     
-    // Click the element
+    // TEMPORARILY COMMENTED: Click the element
     const box = await (deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>).boundingBox();
     if (box) {
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      await waitRandomTime(500, 1000);
-      await page.mouse.down();
-      await page.mouse.up();
+      // TEMPORARILY COMMENTED: Click on delivery item
+      // await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      // await waitRandomTime(500, 1000);
+      // await page.mouse.down();
+      // await page.mouse.up();
+      logMessage(`  [TEMPORARILY DISABLED] Would click on delivery item ${orderNumber} at position (${box.x + box.width / 2}, ${box.y + box.height / 2})`);
     } else {
-      await page.evaluate((handle) => {
-        const element = handle as HTMLElement;
-        if (element) {
-          element.click();
-        }
-      }, deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>);
+      // TEMPORARILY COMMENTED: Fallback click
+      // await page.evaluate((handle) => {
+      //   const element = handle as HTMLElement;
+      //   if (element) {
+      //     element.click();
+      //   }
+      // }, deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>);
+      logMessage(`  [TEMPORARILY DISABLED] Would click on delivery item ${orderNumber} (fallback method)`);
     }
     
     await waitRandomTime(1000, 2000);
     
-    // Wait for navigation
-    try {
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-    } catch (navError) {
-      logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
-    }
+    // TEMPORARILY COMMENTED: Wait for navigation (since we're not clicking, navigation won't happen)
+    // try {
+    //   await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    // } catch (navError) {
+    //   logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
+    // }
     
     await waitRandomTime(1000, 2000);
     
-    // Check if navigation was successful
+    // Check if navigation was successful (skip check since we're not clicking)
     const currentUrl = page.url();
     if (currentUrl.includes('/deliveries')) {
-      logMessage(`Navigation failed, still on deliveries page`, 'WARNING');
+      logMessage(`[TEMPORARILY DISABLED] Would navigate to order details (currently still on deliveries page)`, 'WARNING');
       await deliveryItemHandle.dispose();
       return false;
     }
     
-    logMessage(`Successfully navigated to order details`);
+    logMessage(`[TEMPORARILY DISABLED] Would have navigated to order details`);
     
     // Perform button actions on the order page
     await performOrderActions(page, orderNumber, fullProcess);
