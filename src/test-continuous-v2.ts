@@ -445,6 +445,31 @@ async function checkNoDeliveries(page: puppeteer.Page): Promise<boolean> {
 }
 
 /**
+ * Handle "No Deliveries available" by reloading page up to maxAttempts times
+ * Returns true if deliveries are now available, false if still no deliveries after all attempts
+ */
+async function handleNoDeliveriesWithReload(page: puppeteer.Page, maxAttempts: number = 3): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const hasNoDeliveries = await checkNoDeliveries(page);
+    
+    if (!hasNoDeliveries) {
+      logMessage(`✓ Deliveries are now available (after ${attempt - 1} reload attempt(s))`);
+      return true;
+    }
+    
+    if (attempt < maxAttempts) {
+      logMessage(`"No Deliveries available" detected (attempt ${attempt}/${maxAttempts}), reloading page...`);
+      await page.reload({ waitUntil: 'networkidle2' });
+      await waitRandomTime(2000, 3000);
+    } else {
+      logMessage(`"No Deliveries available" still present after ${maxAttempts} reload attempt(s)`);
+    }
+  }
+  
+  return false;
+}
+
+/**
  * Check if page contains "expired" or "Delivering an order?" text anywhere
  */
 async function checkExpired(page: puppeteer.Page): Promise<boolean> {
@@ -1652,13 +1677,18 @@ async function testContinuous(): Promise<void> {
     while (true) {
       logMessage('\n=== Starting new check cycle ===');
       
-      // Check for "No Deliveries available"
+      // Check for "No Deliveries available" and reload up to 3 times if needed
       const hasNoDeliveries = await checkNoDeliveries(page);
       if (hasNoDeliveries) {
-        logMessage('"No Deliveries available" detected, reloading page...');
-        await page.reload({ waitUntil: 'networkidle2' });
-        await waitRandomTime(1000, 2000);
-        continue;
+        logMessage('"No Deliveries available" detected, attempting to reload page (max 3 attempts)...');
+        const deliveriesAvailable = await handleNoDeliveriesWithReload(page, 3);
+        if (!deliveriesAvailable) {
+          logMessage('No deliveries available after 3 reload attempts, skipping this cycle');
+          logMessage('Waiting 60 seconds before next check...');
+          await new Promise(resolve => setTimeout(resolve, 60000));
+          continue;
+        }
+        // Deliveries are now available, continue with processing
       }
       
       // Check for expired link
@@ -1678,6 +1708,22 @@ async function testContinuous(): Promise<void> {
         logMessage('Could not navigate to deliveries page, skipping this cycle', 'WARNING');
         await new Promise(resolve => setTimeout(resolve, 60000));
         continue;
+      }
+      
+      // IMPORTANT: Check for "No Deliveries available" AFTER ensuring we're on deliveries page
+      // This must be done BEFORE processing the list
+      // Reload up to 3 times if "No Deliveries available" is detected
+      const hasNoDeliveriesAfterNav = await checkNoDeliveries(page);
+      if (hasNoDeliveriesAfterNav) {
+        logMessage('"No Deliveries available" detected after navigation, attempting to reload page (max 3 attempts)...');
+        const deliveriesAvailable = await handleNoDeliveriesWithReload(page, 3);
+        if (!deliveriesAvailable) {
+          logMessage('No deliveries available after 3 reload attempts, skipping list processing...');
+          logMessage('Waiting 60 seconds before next check...');
+          await new Promise(resolve => setTimeout(resolve, 60000));
+          continue;
+        }
+        // Deliveries are now available, continue with processing
       }
       
       // Process deliveries - this processes ALL orders in "Today" section
