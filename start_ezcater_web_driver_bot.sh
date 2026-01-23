@@ -59,6 +59,24 @@ xhost +local: 2>/dev/null || true
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
+# Verify Node.js is available
+if ! command -v node &> /dev/null; then
+    echo "ERROR: Node.js is not available. Please install Node.js first."
+    exit 1
+fi
+
+# Verify npm is available
+if ! command -v npm &> /dev/null; then
+    echo "ERROR: npm is not available. Please install npm first."
+    exit 1
+fi
+
+# Verify PM2 is available
+if ! command -v pm2 &> /dev/null; then
+    echo "ERROR: PM2 is not installed. Please install PM2 first: npm install -g pm2"
+    exit 1
+fi
+
 echo "Node version: $(node --version)"
 echo "NPM version: $(npm --version)"
 echo "PM2 version: $(pm2 --version)"
@@ -94,23 +112,63 @@ fi
 # Install dependencies if package.json exists
 if [ -f "package.json" ]; then
     echo "Installing dependencies..."
-    npm install --production=false
+    if ! npm install --production=false; then
+        echo "ERROR: Failed to install dependencies"
+        exit 1
+    fi
+    echo "Dependencies installed successfully"
 fi
 
 # Run build if enabled and build script exists
 if [ "$RUN_BUILD" = "true" ] && [ -f "package.json" ]; then
     if grep -q '"build"' package.json; then
         echo "Running build..."
-        npm run build
+        if ! npm run build; then
+            echo "ERROR: Build failed"
+            exit 1
+        fi
+        
+        # Verify build output exists
+        if [ ! -d "dist" ] && [ ! -f "dist/main.js" ]; then
+            echo "WARNING: Build completed but dist/main.js not found"
+            echo "Checking if dist directory exists..."
+            ls -la dist/ 2>/dev/null || echo "dist/ directory does not exist"
+        else
+            echo "Build completed successfully"
+        fi
     fi
 fi
 
 # Start application with PM2
 echo "Starting application with PM2..."
-pm2 start npm --name "$APP_NAME" -- start
+
+# Check if dist/main.js exists before starting
+if [ ! -f "dist/main.js" ]; then
+    echo "ERROR: dist/main.js not found. Please run 'npm run build' first."
+    exit 1
+fi
+
+# Start the application
+if pm2 start npm --name "$APP_NAME" -- start; then
+    echo "Application started successfully!"
+    
+    # Wait a moment and check status
+    sleep 2
+    if pm2 list | grep "$APP_NAME" | grep -q "online"; then
+        echo "Application is running and online"
+    elif pm2 list | grep "$APP_NAME" | grep -q "errored"; then
+        echo "WARNING: Application started but is in errored state"
+        echo "Check logs with: pm2 logs $APP_NAME"
+        exit 1
+    else
+        echo "Application status: $(pm2 list | grep "$APP_NAME" | awk '{print $10}')"
+    fi
+else
+    echo "ERROR: Failed to start application with PM2"
+    exit 1
+fi
 
 # IMPORTANT: DO NOT save PM2 state
-echo "Application started successfully!"
 echo "Note: PM2 state NOT saved - XFCE autostart will manage restarts"
 
 exit 0
