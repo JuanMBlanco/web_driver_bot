@@ -1742,13 +1742,21 @@ async function testContinuous(): Promise<void> {
       logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
       logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
       
-      // IMPORTANT: Process eligible orders, but limit to 1 click per cycle
+      // IMPORTANT: Process eligible orders, but limit to 1 click per order per cycle
+      // Track which orders have been clicked in this cycle
+      const clickedOrdersThisCycle = new Set<string>();
       let clickedCount = 0;
       let failedCount = 0;
       
       for (let i = 0; i < eligibleToClick.length; i++) {
         const delivery = eligibleToClick[i];
         logMessage(`\n>>> Processing order ${i + 1}/${eligibleToClick.length}: ${delivery.orderNumber} <<<`);
+        
+        // Skip if this order was already clicked in this cycle
+        if (clickedOrdersThisCycle.has(delivery.orderNumber)) {
+          logMessage(`  ⏭ Skipping order ${delivery.orderNumber} - already clicked in this cycle`);
+          continue;
+        }
         
         try {
           // Determine if full process is needed based on actionType
@@ -1764,11 +1772,8 @@ async function testContinuous(): Promise<void> {
           if (success) {
             logClickedOrder(delivery.orderNumber, delivery.timeText, delivery.status, delivery.reason);
             logMessage(`✓ Successfully clicked order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`);
+            clickedOrdersThisCycle.add(delivery.orderNumber);
             clickedCount++;
-            
-            // Limit: Only 1 click per cycle - stop processing after first successful click
-            logMessage(`  Limit reached: 1 click per cycle. Stopping processing for this cycle.`);
-            break;
             
             // Verify we're back on the deliveries list before continuing
             const currentUrl = page.url();
