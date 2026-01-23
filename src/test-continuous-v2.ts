@@ -1677,6 +1677,12 @@ async function testContinuous(): Promise<void> {
     while (true) {
       logMessage('\n=== Starting new check cycle ===');
       
+      // IMPORTANT: Reload page at the start of each cycle to ensure fresh data
+      logMessage('Reloading page to get latest data...');
+      await page.reload({ waitUntil: 'networkidle2' });
+      await waitRandomTime(2000, 3000);
+      logMessage('Page reloaded, starting checks...');
+      
       // Check for "No Deliveries available" and reload up to 3 times if needed
       const hasNoDeliveries = await checkNoDeliveries(page);
       if (hasNoDeliveries) {
