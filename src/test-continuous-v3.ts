@@ -7,6 +7,66 @@ import puppeteer from 'puppeteer';
 import yaml from 'js-yaml';
 import type puppeteerTypes from 'puppeteer';
 
+// API Response Interfaces
+interface ApiOrderResponse {
+  StatusCode: number;
+  Code: string;
+  Message: string;
+  Mark: string;
+  LogId: string | null;
+  IsError: boolean;
+  Errors: any[];
+  Warnings: any[];
+  Meta: {
+    Server: {
+      Date: string;
+      Time: string;
+      DateOffSet: string;
+      TimeZone: string;
+      TimeZoneAbbr: string;
+    };
+  };
+  Count: number;
+  Data: ApiOrder[];
+}
+
+interface ApiOrder {
+  Id: string;
+  ShortId: string;
+  BusinessKindCode: number;
+  SaleOrderId: string | null;
+  DriverRouteId: string | null;
+  PickupAt: string;
+  DeliveryAt: string;
+  DeliveryZoneId: string;
+  OriginId: string;
+  DestinationId: string;
+  UserId: string;
+  UserIdAt: string;
+  StatusSequence: number;
+  StatusCode: number;
+  StatusDescription: string;
+  RoutePriority: number;
+  Latitude: string;
+  Longitude: string;
+  Comment: string;
+  Tag: string;
+  CanceledBy: string | null;
+  CanceledAt: string | null;
+  CreatedBy: string;
+  CreatedAt: string;
+  UpdatedBy: string;
+  UpdatedAt: string;
+  DisabledBy: string | null;
+  DisabledAt: string | null;
+  Business: {
+    Ticket: string;
+    Fixed?: any;
+    EMailId?: string[];
+  };
+  [key: string]: any;
+}
+
 interface Token {
   token: string;
   role: string;
@@ -431,6 +491,482 @@ function parseDeliveryTime(timeString: string): { parsed: Date | null } {
 }
 
 /**
+ * Parse ISO datetime string (e.g., "2026-01-26T08:00:00.000-05:00") and convert to Date object
+ */
+function parseISODeliveryTime(isoString: string): Date | null {
+  try {
+    return new Date(isoString);
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Format Date to time string like "12:00 PM"
+ */
+function formatDeliveryTime(date: Date): string {
+  const hours = date.getHours();
+  const minutes = date.getMinutes();
+  const period = hours >= 12 ? 'PM' : 'AM';
+  const hours12 = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
+  const minutesStr = String(minutes).padStart(2, '0');
+  return `${hours12}:${minutesStr} ${period}`;
+}
+
+/**
+ * Detect order tickets from the page DOM - ONLY from "Today" section
+ */
+async function detectOrderTicketsFromPage(page: puppeteer.Page): Promise<string[]> {
+  try {
+    const tickets = await page.evaluate(() => {
+      // Find "Today" section first
+      const h2Elements = Array.from(document.querySelectorAll('h2'));
+      const todayH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Today';
+      });
+      
+      if (!todayH2) {
+        return [];
+      }
+      
+      // Find the container for "Today" section
+      let todayContainer: HTMLElement | null = null;
+      let container = todayH2.parentElement;
+      while (container && container !== document.body) {
+        if (container.firstElementChild === todayH2) {
+          todayContainer = container as HTMLElement;
+          break;
+        }
+        container = container.parentElement;
+      }
+      
+      if (!todayContainer) {
+        return [];
+      }
+      
+      // Only search for ticket elements within "Today" section
+      const ticketElements = Array.from(todayContainer.querySelectorAll('div.ez-7crqac'));
+      const foundTickets: string[] = [];
+      
+      for (const element of ticketElements) {
+        const text = element.textContent?.trim();
+        if (text && text.startsWith('#')) {
+          // Extract ticket code (e.g., "#321-R4M" -> "321-R4M")
+          const ticketCode = text.substring(1);
+          if (ticketCode && !foundTickets.includes(ticketCode)) {
+            foundTickets.push(ticketCode);
+          }
+        }
+      }
+      
+      return foundTickets;
+    });
+    
+    logMessage(`Detected ${tickets.length} order ticket(s) from "Today" section: ${tickets.join(', ')}`);
+    return tickets;
+  } catch (error: any) {
+    logMessage(`Error detecting tickets from page: ${error.message}`, 'ERROR');
+    return [];
+  }
+}
+
+/**
+ * Get order time from page for a specific order - ONLY search within "Today" section
+ * Returns the time text (e.g., "11:30 AM EST") and parsed Date, or null if not found
+ */
+async function getOrderTimeFromPage(page: puppeteer.Page, orderNumber: string): Promise<{ timeText: string, parsedDate: Date } | null> {
+  try {
+    const result = await page.evaluate((orderNum) => {
+      // Find "Today" section first
+      const h2Elements = Array.from(document.querySelectorAll('h2'));
+      const todayH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Today';
+      });
+      
+      if (!todayH2) {
+        return { timeText: '', found: false };
+      }
+      
+      // Find the container for "Today" section
+      let todayContainer: HTMLElement | null = null;
+      let container = todayH2.parentElement;
+      while (container && container !== document.body) {
+        if (container.firstElementChild === todayH2) {
+          todayContainer = container as HTMLElement;
+          break;
+        }
+        container = container.parentElement;
+      }
+      
+      if (!todayContainer) {
+        return { timeText: '', found: false };
+      }
+      
+      // Only search for order containers within "Today" section
+      const allContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
+      for (const container of allContainers) {
+        const orderDiv = container.querySelector('div.ez-7crqac');
+        if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+          // Look for time spans in this container
+          const allSpans = container.querySelectorAll('span');
+          for (const span of Array.from(allSpans)) {
+            const timeText = span.textContent?.trim() || '';
+            // Match time format like "11:30 AM EST" or "11:30 AM"
+            if (timeText.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
+              return { timeText: timeText, found: true };
+            }
+          }
+        }
+      }
+      return { timeText: '', found: false };
+    }, orderNumber);
+    
+    if (!result.found || !result.timeText) {
+      logMessage(`  ⚠ Could not find time for order ${orderNumber} on page`, 'WARNING');
+      return null;
+    }
+    
+    // Parse the time text
+    const parsed = parseDeliveryTime(result.timeText);
+    if (!parsed.parsed) {
+      logMessage(`  ⚠ Could not parse time "${result.timeText}" for order ${orderNumber}`, 'WARNING');
+      return null;
+    }
+    
+    return {
+      timeText: result.timeText,
+      parsedDate: parsed.parsed
+    };
+  } catch (error: any) {
+    logMessage(`  ✗ Error getting time from page for order ${orderNumber}: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Get today's date in YYYY-MM-DD format (EST timezone)
+ */
+function getTodayDateEST(): string {
+  const now = new Date();
+  const estFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  
+  return estFormatter.format(now);
+}
+
+/**
+ * Split array into chunks of specified size
+ */
+function chunkArray<T>(array: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/**
+ * Extract ticket from Business.Ticket field using regex
+ * The field may contain: #XXX-XXX, XXX-XXX, or other text with the pattern
+ * Returns the ticket code in format XXX-XXX (without #), or null if not found
+ */
+function extractTicketFromApiResponse(ticketField: string | null | undefined): string | null {
+  if (!ticketField) {
+    return null;
+  }
+  
+  // Convert to string and trim
+  const ticketStr = String(ticketField).trim();
+  
+  if (!ticketStr) {
+    return null;
+  }
+  
+  // Strategy 1: Try to match pattern with # at the beginning: #XXX-XXX
+  // Example: #8AR-13R
+  let match = ticketStr.match(/#([A-Z0-9]+-[A-Z0-9]+)/i);
+  if (match && match[1]) {
+    return match[1].toUpperCase(); // Return XXX-XXX in uppercase
+  }
+  
+  // Strategy 2: Try to match pattern without #: XXX-XXX
+  // Example: 8AR-13R
+  match = ticketStr.match(/([A-Z0-9]+-[A-Z0-9]+)/i);
+  if (match && match[1]) {
+    return match[1].toUpperCase(); // Return XXX-XXX in uppercase
+  }
+  
+  // Strategy 3: Try to find any pattern that looks like XXX-XXX anywhere in the string
+  // This handles cases where there might be extra text before or after
+  const allMatches = ticketStr.match(/([A-Z0-9]{2,}-[A-Z0-9]{2,})/gi);
+  if (allMatches && allMatches.length > 0) {
+    // Return the first match that looks like a valid ticket (at least 2 chars on each side of dash)
+    return allMatches[0].toUpperCase();
+  }
+  
+  return null;
+}
+
+/**
+ * Escape special characters in ticket code for SQL LIKE clause
+ * Escapes single quotes by doubling them (SQL standard)
+ * Escapes LIKE wildcards (% and _) by prefixing with backslash
+ * This prevents SQL reserved words and special characters from breaking the query
+ * Note: We use ESCAPE '\\' in the LIKE clause to handle % and _ as literals
+ */
+function escapeTicketForSQL(ticket: string): string {
+  let escaped = ticket;
+  
+  // Escape backslashes FIRST before escaping other characters
+  escaped = escaped.replace(/\\/g, '\\\\');
+  
+  // Escape single quotes by doubling them (SQL standard)
+  // This prevents SQL injection and syntax errors
+  escaped = escaped.replace(/'/g, "''");
+  
+  // Escape LIKE wildcards (% and _) by prefixing with backslash
+  // We use ESCAPE '\\' in the LIKE clause, so these will be treated as literals
+  escaped = escaped.replace(/%/g, '\\%');
+  escaped = escaped.replace(/_/g, '\\_');
+  
+  return escaped;
+}
+
+/**
+ * Get order count from API with proper headers and parameters
+ * Makes a single API call with all tickets
+ */
+async function getOrderCount(orderTickets: string[]): Promise<number | null> {
+  try {
+    const baseUrl = 'https://kk-usa-fl-prod01-odin-v2-op.odindt.com/api/v1/business/dev007/dispatcher/delivery/order/search/count';
+    const todayDate = getTodayDateEST();
+    
+    logMessage(`Making single API call with ${orderTickets.length} ticket(s)`);
+    
+    // Build WHERE clause with all tickets in a single call
+    // Use date range: >= today AND < tomorrow to include all deliveries for today
+    let whereClause = `(A.DeliveryAt >= '${todayDate}') AND (A.DeliveryAt < '${todayDate}' + INTERVAL 1 day) AND E.Canceled = 0 AND A.BusinessKindCode = 300 AND E.Canceled = 0`;
+    
+    // Add ExtraData LIKE for each ticket (with % wildcards)
+    // Escape special characters in tickets to prevent SQL syntax errors
+    if (orderTickets.length > 0) {
+      const extraDataConditions = orderTickets.map(ticket => {
+        const escapedTicket = escapeTicketForSQL(ticket);
+        // Use CONCAT to build the LIKE pattern to avoid % in the string itself
+        // This prevents URL encoding issues with % characters
+        return `A.ExtraData LIKE CONCAT('%', '${escapedTicket}', '%')`;
+      }).join(' OR ');
+      whereClause += ` AND (${extraDataConditions})`;
+    }
+    
+    // Build query parameters manually to avoid URLSearchParams decoding issues
+    // Use encodeURIComponent for where clause to properly encode %25 sequences
+    const encodedWhere = encodeURIComponent(whereClause);
+    const countUrl = `${baseUrl}?where=${encodedWhere}&offset=0&limit=200`;
+    
+    const response = await fetch(countUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'p:f6797849-d5df-43c4-8349-2326875571e7',
+        'FrontendId': 'ccc1',
+        'TimeZoneId': 'America/Los_Angeles',
+        'Language': 'en_US'
+      }
+    });
+
+    if (!response.ok) {
+      let errorBody = '';
+      try {
+        const errorText = await response.text();
+        errorBody = errorText;
+        logMessage(`Failed to get order count: ${response.status} ${response.statusText}`, 'ERROR');
+        logMessage(`Error response body: ${errorBody}`, 'ERROR');
+      } catch (e) {
+        logMessage(`Failed to get order count: ${response.status} ${response.statusText}`, 'ERROR');
+      }
+      return null;
+    }
+
+    const data = await response.json() as ApiOrderResponse;
+    
+    if (data.IsError) {
+      logMessage(`API returned error: ${data.Message}`, 'ERROR');
+      return null;
+    }
+
+    logMessage(`Order count: ${data.Count}`);
+    return data.Count;
+  } catch (error: any) {
+    logMessage(`Error getting order count: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Get orders from API with pagination support and proper headers/parameters
+ * Makes a single API call with all tickets
+ */
+async function getOrdersFromAPI(orderTickets: string[], offset: number = 0, limit: number = 200): Promise<ApiOrder[] | null> {
+  try {
+    const baseUrl = 'https://kk-usa-fl-prod01-odin-v2-op.odindt.com/api/v1/business/dev007/dispatcher/delivery/order/search';
+    const todayDate = getTodayDateEST();
+    
+    logMessage(`Making single API call with ${orderTickets.length} ticket(s)`);
+    
+    // Build WHERE clause with all tickets in a single call
+    // Use date range: >= today AND < tomorrow to include all deliveries for today
+    let whereClause = `(A.DeliveryAt >= '${todayDate}') AND (A.DeliveryAt < '${todayDate}' + INTERVAL 1 day) AND E.Canceled = 0 AND A.BusinessKindCode = 300 AND E.Canceled = 0`;
+    
+    // Add ExtraData LIKE for each ticket (with % wildcards)
+    // Escape special characters in tickets to prevent SQL syntax errors
+    if (orderTickets.length > 0) {
+      const extraDataConditions = orderTickets.map(ticket => {
+        const escapedTicket = escapeTicketForSQL(ticket);
+        // Use CONCAT to build the LIKE pattern to avoid % in the string itself
+        // This prevents URL encoding issues with % characters
+        return `A.ExtraData LIKE CONCAT('%', '${escapedTicket}', '%')`;
+      }).join(' OR ');
+      whereClause += ` AND (${extraDataConditions})`;
+    }
+    
+    // Build query parameters manually to avoid URLSearchParams decoding issues
+    // Use encodeURIComponent for where clause to properly encode %25 sequences
+    const encodedWhere = encodeURIComponent(whereClause);
+    const searchUrl = `${baseUrl}?where=${encodedWhere}&offset=${offset}&limit=${limit}`;
+    
+    const response = await fetch(searchUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'p:f6797849-d5df-43c4-8349-2326875571e7',
+        'FrontendId': 'ccc1',
+        'TimeZoneId': 'America/Los_Angeles',
+        'Language': 'en_US'
+      }
+    });
+
+    if (!response.ok) {
+      let errorBody = '';
+      try {
+        const errorText = await response.text();
+        errorBody = errorText;
+        logMessage(`Failed to get orders: ${response.status} ${response.statusText}`, 'ERROR');
+        logMessage(`Error response body: ${errorBody}`, 'ERROR');
+      } catch (e) {
+        logMessage(`Failed to get orders: ${response.status} ${response.statusText}`, 'ERROR');
+      }
+      return null;
+    }
+
+    const data = await response.json() as ApiOrderResponse;
+    
+    if (data.IsError) {
+      logMessage(`API returned error: ${data.Message}`, 'ERROR');
+      return null;
+    }
+
+    logMessage(`Retrieved ${data.Data.length} orders (total count: ${data.Count})`);
+    
+    // Remove duplicates based on order ID
+    const uniqueOrders = new Map<string, ApiOrder>();
+    for (const order of data.Data) {
+      const orderId = order.Id || order.ShortId || '';
+      if (orderId && !uniqueOrders.has(orderId)) {
+        uniqueOrders.set(orderId, order);
+      }
+    }
+    
+    const finalOrders = Array.from(uniqueOrders.values());
+    logMessage(`Total unique orders retrieved: ${finalOrders.length}`);
+    return finalOrders;
+  } catch (error: any) {
+    logMessage(`Error getting orders from API: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Get all orders from API with automatic pagination
+ * Requires orderTickets to build the WHERE clause
+ */
+async function getAllOrdersFromAPI(orderTickets: string[]): Promise<ApiOrder[]> {
+  const allOrders: ApiOrder[] = [];
+  
+  try {
+    // First, get the count
+    const count = await getOrderCount(orderTickets);
+    
+    if (count === null) {
+      logMessage('Could not get order count, attempting to fetch orders anyway...', 'WARNING');
+    } else {
+      logMessage(`Total orders to fetch: ${count}`);
+    }
+    
+    const limit = 200;
+    let currentOffset = 0;
+    let hasMore = true;
+    
+    while (hasMore) {
+      const orders = await getOrdersFromAPI(orderTickets, currentOffset, limit);
+      
+      if (!orders || orders.length === 0) {
+        hasMore = false;
+        break;
+      }
+      
+      allOrders.push(...orders);
+      logMessage(`Fetched offset ${currentOffset}: ${orders.length} orders (total so far: ${allOrders.length})`);
+      
+      // If we got fewer orders than limit, we've reached the end
+      if (orders.length < limit) {
+        hasMore = false;
+      } else {
+        currentOffset += limit;
+        // Small delay between requests to avoid overwhelming the API
+        await waitRandomTime(500, 1000);
+      }
+      
+      // Safety check: if count was provided and we've fetched that many, stop
+      if (count !== null && allOrders.length >= count) {
+        hasMore = false;
+      }
+    }
+    
+    logMessage(`Total orders fetched from API: ${allOrders.length}`);
+    return allOrders;
+  } catch (error: any) {
+    logMessage(`Error fetching all orders from API: ${error.message}`, 'ERROR');
+    return allOrders; // Return what we have so far
+  }
+}
+
+/**
+ * Map API order status to our status format
+ */
+function mapApiStatusToDeliveryStatus(apiOrder: ApiOrder): string | null {
+  // Map StatusDescription to our expected statuses
+  const statusDescription = apiOrder.StatusDescription || '';
+  
+  if (statusDescription === 'En Route to Customer') {
+    return 'En Route to Customer';
+  } else if (statusDescription === 'Delivery Scheduled') {
+    return 'Delivery Scheduled';
+  } else if (statusDescription === 'Finished' || statusDescription === 'Expired') {
+    return 'Expired';
+  }
+  
+  // Return the status description as-is if it doesn't match known statuses
+  return statusDescription || null;
+}
+
+/**
  * Check if page contains "No Deliveries available" text
  */
 async function checkNoDeliveries(page: puppeteer.Page): Promise<boolean> {
@@ -742,12 +1278,13 @@ async function getDeliveryStatusFromPage(page: puppeteer.Page, orderNumber: stri
 
 /**
  * Process delivery orders with continuous monitoring logic
+ * V3: Uses API instead of DOM extraction
  */
 async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>> {
   const results: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }> = [];
   
   try {
-    logMessage('Processing deliveries for continuous monitoring...');
+    logMessage('Processing deliveries for continuous monitoring (using API)...');
     
     // Get current time - convert to EST (this is the time used for all comparisons)
     const currentTime = getCurrentTimeEST();
@@ -757,205 +1294,124 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
     logMessage(`Current time (EST) in milliseconds: ${currentTimeMs}`);
     logMessage(`Note: Both Param1 and Param2 will be calculated per order based on each order's delivery time`);
     
-    // Mark and extract delivery data
-    await page.evaluate(() => {
-      const h2Elements = Array.from(document.querySelectorAll('h2'));
-      const upcomingH2 = h2Elements.find(h2 => {
-        const text = h2.textContent?.trim();
-        return text === 'Upcoming';
-      });
-      
-      let upcomingContainer: HTMLElement | null = null;
-      if (upcomingH2) {
-        let container = upcomingH2.parentElement;
-        while (container && container !== document.body) {
-          if (container.firstElementChild === upcomingH2) {
-            upcomingContainer = container;
-            break;
-          }
-          container = container.parentElement;
-        }
-      }
-      
-      const todayH2 = h2Elements.find(h2 => {
-        const text = h2.textContent?.trim();
-        return text === 'Today';
-      });
-      
-      if (!todayH2) return;
-      
-      let container = todayH2.parentElement;
-      while (container && container !== document.body) {
-        if (container.firstElementChild === todayH2) {
-          const parent = container.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children);
-            let spanIndex = 0;
-            
-            siblings.forEach((sibling) => {
-              if (upcomingContainer && (sibling === upcomingContainer || upcomingContainer.contains(sibling))) {
-                return;
-              }
-              
-              const timeSpans = Array.from(sibling.querySelectorAll('span.c-AsWAM'));
-              timeSpans.forEach((span) => {
-                if (upcomingContainer && upcomingContainer.contains(span)) {
-                  return;
-                }
-                
-                const timeText = span.textContent?.trim() || '';
-                if (timeText.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
-                  span.setAttribute('data-delivery-time-id', spanIndex.toString());
-                  spanIndex++;
-                }
-              });
-            });
-            break;
-          }
-        }
-        container = container.parentElement;
-      }
-    });
+    // First, detect order tickets from the page
+    logMessage('Detecting order tickets from page...');
+    const orderTickets = await detectOrderTicketsFromPage(page);
     
-    // Extract delivery data
-    const deliveryData = await page.evaluate(() => {
-      const h2Elements = Array.from(document.querySelectorAll('h2'));
-      const upcomingH2 = h2Elements.find(h2 => {
-        const text = h2.textContent?.trim();
-        return text === 'Upcoming';
-      });
-      
-      let upcomingContainer: HTMLElement | null = null;
-      if (upcomingH2) {
-        let container = upcomingH2.parentElement;
-        while (container && container !== document.body) {
-          if (container.firstElementChild === upcomingH2) {
-            upcomingContainer = container;
-            break;
-          }
-          container = container.parentElement;
-        }
-      }
-      
-      const todayH2 = h2Elements.find(h2 => {
-        const text = h2.textContent?.trim();
-        return text === 'Today';
-      });
-      
-      if (!todayH2) return null;
-      
-      let container = todayH2.parentElement;
-      while (container && container !== document.body) {
-        if (container.firstElementChild === todayH2) {
-          const parent = container.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children);
-            const deliveryItems: Array<{ timeText: string, orderNumber: string, spanId: string }> = [];
-            
-            siblings.forEach((sibling) => {
-              if (upcomingContainer && (sibling === upcomingContainer || upcomingContainer.contains(sibling))) {
-                return;
-              }
-              
-              const timeSpans = Array.from(sibling.querySelectorAll('span.c-AsWAM[data-delivery-time-id]'));
-              
-              timeSpans.forEach((span) => {
-                if (upcomingContainer && upcomingContainer.contains(span)) {
-                  return;
-                }
-                
-                const timeText = span.textContent?.trim() || '';
-                if (timeText.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
-                  const spanId = span.getAttribute('data-delivery-time-id') || '';
-                  
-                  let deliveryItem = span.parentElement;
-                  let orderNumber = '';
-                  
-                  while (deliveryItem && deliveryItem !== document.body) {
-                    const orderDiv = deliveryItem.querySelector('div.ez-7crqac');
-                    if (orderDiv) {
-                      orderNumber = orderDiv.textContent?.trim() || '';
-                      break;
-                    }
-                    deliveryItem = deliveryItem.parentElement;
-                  }
-                  
-                  if (!orderNumber) {
-                    let fallbackItem = span.parentElement;
-                    while (fallbackItem && fallbackItem !== document.body) {
-                      const orderMatch = fallbackItem.textContent?.match(/#[A-Z0-9-]+/);
-                      if (orderMatch) {
-                        orderNumber = orderMatch[0];
-                        break;
-                      }
-                      fallbackItem = fallbackItem.parentElement;
-                    }
-                  }
-                  
-                  if (orderNumber) {
-                    deliveryItems.push({
-                      timeText: timeText,
-                      orderNumber: orderNumber,
-                      spanId: spanId
-                    });
-                  }
-                }
-              });
-            });
-            
-            return deliveryItems;
-          }
-        }
-        container = container.parentElement;
-      }
-      
-      return null;
-    });
-    
-    if (!deliveryData || deliveryData.length === 0) {
-      logMessage('No delivery items found in "Today" section', 'WARNING');
+    if (orderTickets.length === 0) {
+      logMessage('No order tickets detected from page, skipping API call', 'WARNING');
       return results;
     }
     
-    logMessage(`Found ${deliveryData.length} delivery item(s) in "Today" section`);
+    // Get all orders from API using detected tickets
+    const apiOrders = await getAllOrdersFromAPI(orderTickets);
     
-    // Process each delivery - IMPORTANT: Process ALL orders, even if some have errors
-    for (let i = 0; i < deliveryData.length; i++) {
-      const delivery = deliveryData[i];
-      if (!delivery || !delivery.timeText || !delivery.orderNumber) {
-        logMessage(`Skipping delivery ${i + 1}/${deliveryData.length}: missing data`, 'WARNING');
-        continue;
+    if (!apiOrders || apiOrders.length === 0) {
+      logMessage('No orders found from API', 'WARNING');
+      return results;
+    }
+    
+    logMessage(`Found ${apiOrders.length} order(s) from API`);
+    
+    // Create a Set of order tickets found in API for quick lookup
+    const apiOrderTickets = new Set<string>();
+    for (const apiOrder of apiOrders) {
+      const ticket = extractTicketFromApiResponse(apiOrder.Business?.Ticket);
+      if (ticket) {
+        apiOrderTickets.add(ticket);
       }
-      
-      logMessage(`Reviewing order ${i + 1}/${deliveryData.length}: ${delivery.orderNumber} (${delivery.timeText})`);
-      
+    }
+    
+    // Find orders that are on the page but not in the API
+    const missingOrders: string[] = [];
+    for (const ticket of orderTickets) {
+      if (!apiOrderTickets.has(ticket)) {
+        missingOrders.push(ticket);
+      }
+    }
+    
+    if (missingOrders.length > 0) {
+      logMessage(`Found ${missingOrders.length} order(s) on page but not in API: ${missingOrders.map(t => `#${t}`).join(', ')}`);
+      logMessage(`  Processing missing orders with fallback (using page time)...`);
+    }
+    
+    // Process each order from API
+    for (let i = 0; i < apiOrders.length; i++) {
+      const apiOrder = apiOrders[i];
       
       try {
-        // Parse delivery time
-        const { parsed: deliveryTime } = parseDeliveryTime(delivery.timeText);
-        if (!deliveryTime) {
-          logMessage(`  Could not parse time: ${delivery.timeText}`, 'WARNING');
+        // Extract ticket from Business.Ticket field using regex (returns XXX-XXX format)
+        const extractedTicket = extractTicketFromApiResponse(apiOrder.Business?.Ticket);
+        // Add # prefix to create orderNumber (format: #XXX-XXX)
+        const orderNumber = extractedTicket ? `#${extractedTicket}` : `#${apiOrder.ShortId || apiOrder.Id}`;
+        
+        // Parse DeliveryAt and PickupAt times
+        const deliveryAtDate = parseISODeliveryTime(apiOrder.DeliveryAt);
+        const pickupAtDate = parseISODeliveryTime(apiOrder.PickupAt);
+        
+        if (!deliveryAtDate) {
+          logMessage(`  Could not parse DeliveryAt time: ${apiOrder.DeliveryAt}`, 'WARNING');
           results.push({
-            orderNumber: delivery.orderNumber,
-            timeText: delivery.timeText,
+            orderNumber: orderNumber,
+            timeText: apiOrder.DeliveryAt,
             status: null,
             shouldClick: false,
-            reason: 'Could not parse time',
+            reason: 'Could not parse DeliveryAt time',
             actionType: null
           });
           continue;
         }
         
-        // Log time comparison details for debugging (using EST time)
-        const timeDiffMs = deliveryTime.getTime() - currentTime.getTime();
-        const timeDiffMinutes = Math.floor(timeDiffMs / (1000 * 60));
-        logMessage(`  Time comparison (EST): Delivery=${deliveryTime.toLocaleTimeString()}, Current=${currentTime.toLocaleTimeString()}, Diff=${timeDiffMinutes} min`);
+        if (!pickupAtDate) {
+          logMessage(`  Could not parse PickupAt time: ${apiOrder.PickupAt}`, 'WARNING');
+          results.push({
+            orderNumber: orderNumber,
+            timeText: apiOrder.DeliveryAt,
+            status: null,
+            shouldClick: false,
+            reason: 'Could not parse PickupAt time',
+            actionType: null
+          });
+          continue;
+        }
         
-        // Get delivery status
+        // Format time text using DeliveryAt
+        const timeText = formatDeliveryTime(deliveryAtDate);
+        
+        logMessage(`Reviewing order ${i + 1}/${apiOrders.length}: ${orderNumber} (${timeText})`);
+        logMessage(`  📡 Using API data for this order`);
+        logMessage(`  DeliveryAt: ${deliveryAtDate.toLocaleTimeString()}`);
+        logMessage(`  PickupAt: ${pickupAtDate.toLocaleTimeString()}`);
+        
+        // Get delivery status from page - ONLY search within "Today" section
+        // TEMPORARILY: Status check is disabled for testing
         let status: string | null = null;
         try {
           const deliveryItemHandle = await page.evaluateHandle((orderNum) => {
-            const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+            // Find "Today" section first
+            const h2Elements = Array.from(document.querySelectorAll('h2'));
+            const todayH2 = h2Elements.find(h2 => {
+              const text = h2.textContent?.trim();
+              return text === 'Today';
+            });
+            
+            if (!todayH2) return null;
+            
+            // Find the container for "Today" section
+            let todayContainer: HTMLElement | null = null;
+            let container = todayH2.parentElement;
+            while (container && container !== document.body) {
+              if (container.firstElementChild === todayH2) {
+                todayContainer = container as HTMLElement;
+                break;
+              }
+              container = container.parentElement;
+            }
+            
+            if (!todayContainer) return null;
+            
+            // Only search for order containers within "Today" section
+            const allDeliveryContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
             for (const container of allDeliveryContainers) {
               const orderDiv = container.querySelector('div.ez-7crqac');
               if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
@@ -963,135 +1419,139 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
               }
             }
             return null;
-          }, delivery.orderNumber);
+          }, orderNumber);
           
           const itemValue = await deliveryItemHandle.jsonValue();
           
           if (itemValue) {
-            status = await getDeliveryStatus(page, itemValue as HTMLElement, delivery.orderNumber);
+            status = await getDeliveryStatus(page, itemValue as HTMLElement, orderNumber);
             if (status) {
-              logMessage(`  ✓ Found status "${status}" for order ${delivery.orderNumber}`);
+              logMessage(`  ✓ Found status "${status}" for order ${orderNumber}`);
             } else {
-              logMessage(`  ⚠ Status not found for order ${delivery.orderNumber}`, 'WARNING');
+              logMessage(`  ⚠ Status not found for order ${orderNumber}`, 'WARNING');
             }
           } else {
-            logMessage(`  ⚠ Could not find delivery container for order ${delivery.orderNumber}`, 'WARNING');
+            logMessage(`  ⚠ Could not find delivery container for order ${orderNumber}`, 'WARNING');
           }
           
           await deliveryItemHandle.dispose();
         } catch (statusError: any) {
-          logMessage(`  Error getting status for ${delivery.orderNumber}: ${statusError.message}`, 'WARNING');
+          logMessage(`  Error getting status for ${orderNumber}: ${statusError.message}`, 'WARNING');
           // Continue processing even if status couldn't be retrieved
         }
         
-        // Check if should click based on rules
+        // TEMPORARILY DISABLED FOR TESTING: Skip status check
+        // SKIP if status is not "Delivery Scheduled" or "En Route to Customer"
+        /*
+        if (status !== 'Delivery Scheduled' && status !== 'En Route to Customer') {
+          logMessage(`  ⏭ SKIPPING order ${orderNumber} - Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`);
+          results.push({
+            orderNumber: orderNumber,
+            timeText: timeText,
+            status: status,
+            shouldClick: false,
+            reason: `Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`,
+            actionType: null
+          });
+          continue;
+        }
+        */
+        
+        // Parse times for comparison
+        const deliveryTime = deliveryAtDate;
+        const deliveryTimeMs = deliveryTime.getTime();
+        const pickupTime = pickupAtDate;
+        const pickupTimeMs = pickupTime.getTime();
+        
+        // Calculate time comparisons
+        const currentTimeMs = currentTime.getTime();
+        
+        // Log time comparison details for debugging (using EST time)
+        const timeDiffMs = deliveryTimeMs - currentTimeMs;
+        const timeDiffMinutes = Math.floor(timeDiffMs / (1000 * 60));
+        logMessage(`  Time comparison (EST): Delivery=${deliveryTime.toLocaleTimeString()}, Current=${currentTime.toLocaleTimeString()}, Diff=${timeDiffMinutes} min`);
+        
+        // Check if should click based on rules (with status checks)
         let shouldClick = false;
         let reason = '';
         let actionType: 'param1' | 'param2' | 'rule3' | null = null;
         
-        // Skip if expired
-        if (status === 'Expired') {
-          shouldClick = false;
-          reason = 'Expired';
-        } else if (status) {
-          // Calculate time comparisons
-          const deliveryTimeMs = deliveryTime.getTime();
-          const currentTimeMs = currentTime.getTime();
-          
-          // Calculate parameter 1 based on THIS ORDER's delivery time (DeliveryAt)
-          // Parameter 1: (deliveryTime - 3 minutes) to (deliveryTime + 3 minutes)
-          // Then check if current time is within this range
-          const param1Start = new Date(deliveryTimeMs - 3 * 60 * 1000);
-          const param1End = new Date(deliveryTimeMs + 3 * 60 * 1000);
-          const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
-          
-          // Calculate parameter 2 based on PickupAt (page time - 20 minutes as fallback)
-          // Parameter 2: (pickupTime - 3 minutes) to (pickupTime + 3 minutes)
-          // PickupAt is approximated as deliveryTime - 20 minutes (fallback since we don't have API)
-          const pickupTimeMs = deliveryTimeMs - 20 * 60 * 1000; // PickupAt = DeliveryAt - 20 minutes
-          const param2Start = new Date(pickupTimeMs - 3 * 60 * 1000);
-          const param2End = new Date(pickupTimeMs + 3 * 60 * 1000);
-          const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
-          
-          const currentTimeGreater = currentTimeMs > deliveryTimeMs;
-          
-          logMessage(`  Status: ${status}, InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
-          logMessage(`  Current time (EST): ${currentTime.toLocaleTimeString()} (${currentTimeMs})`);
-          logMessage(`  Delivery time (DeliveryAt): ${deliveryTime.toLocaleTimeString()} (${deliveryTimeMs})`);
-          const pickupTime = new Date(pickupTimeMs);
-          logMessage(`  Pickup time (PickupAt, approximated): ${pickupTime.toLocaleTimeString()} (${pickupTimeMs})`);
-          logMessage(`  Param1 for this order: ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()} (based on DeliveryAt: ${deliveryTime.toLocaleTimeString()})`);
-          logMessage(`  Param2 for this order: ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()} (based on PickupAt: ${pickupTime.toLocaleTimeString()})`);
-          
-          // Rule 1: Orders in param1 range AND status is "En Route to Customer"
-          // Specifically checking for: <span class="MuiChip-label EzChip-label MuiChip-labelMedium ez-14vsv3w">En Route to Customer</span>
-          // Mark ALL orders that meet this criteria
-          if (inParam1 && status === 'En Route to Customer') {
+        // Calculate parameter 1 based on DeliveryAt time
+        // Parameter 1: (deliveryTime - 3 minutes) to (deliveryTime + 3 minutes)
+        // Then check if current time is within this range
+        const param1Start = new Date(deliveryTimeMs - 3 * 60 * 1000);
+        const param1End = new Date(deliveryTimeMs + 3 * 60 * 1000);
+        const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
+        
+        // Calculate parameter 2 based on PickupAt time
+        // Parameter 2: (pickupTime - 3 minutes) to (pickupTime + 3 minutes)
+        // Then check if current time is within this range
+        const param2Start = new Date(pickupTimeMs - 3 * 60 * 1000);
+        const param2End = new Date(pickupTimeMs + 3 * 60 * 1000);
+        const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
+        
+        const currentTimeGreater = currentTimeMs > deliveryTimeMs;
+        
+        logMessage(`  InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
+        logMessage(`  Current time (EST): ${currentTime.toLocaleTimeString()} (${currentTimeMs})`);
+        logMessage(`  Delivery time: ${deliveryTime.toLocaleTimeString()} (${deliveryTimeMs})`);
+        logMessage(`  Pickup time: ${pickupTime.toLocaleTimeString()} (${pickupTimeMs})`);
+        logMessage(`  Status: ${status}, InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
+        logMessage(`  Param1 range (based on DeliveryAt): ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()}`);
+        logMessage(`  Param2 range (based on PickupAt): ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()}`);
+        
+        // TEMPORARILY DISABLED FOR TESTING: Status checks are ignored
+        // Rule 1: Orders in param1 range (temporarily ignoring status)
+        if (inParam1) {
+          shouldClick = true;
+          actionType = 'param1';
+          reason = 'Param1 range (API data - status check disabled for testing)';
+          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range (status check disabled)`);
+        }
+        
+        // Rule 2: Orders in param2 range (temporarily ignoring status)
+        if (inParam2) {
+          shouldClick = true;
+          actionType = 'param2';
+          reason = 'Param2 range (API data - status check disabled for testing)';
+          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range (status check disabled)`);
+        }
+        
+        // Rule 3: If delivery time < current time (temporarily ignoring status)
+        if (currentTimeGreater) {
+          // Only set rule3 if not already set by param1 or param2
+          if (!shouldClick) {
             shouldClick = true;
-            actionType = 'param1';
-            reason = 'Param1 range AND En Route to Customer (verified element)';
-            logMessage(`  ✓ Rule 1 matched: Order ${delivery.orderNumber} is in param1 range with "En Route to Customer" status`);
+            actionType = 'rule3';
+            reason = `Delivery time < current time (API data - status check disabled for testing)`;
+            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed current time (status check disabled)`);
           }
-          
-          // Rule 2: Orders in param2 range AND status is "Delivery Scheduled"
-          // Specifically checking for: <span class="MuiChip-label EzChip-label MuiChip-labelMedium ez-14vsv3w">Delivery Scheduled</span>
-          // Mark ALL orders that meet this criteria
-          if (inParam2 && status === 'Delivery Scheduled') {
-            shouldClick = true;
-            actionType = 'param2';
-            reason = 'Param2 range AND Delivery Scheduled (verified element)';
-            logMessage(`  ✓ Rule 2 matched: Order ${delivery.orderNumber} is in param2 range with "Delivery Scheduled" status`);
-          } else if (status === 'Delivery Scheduled') {
-            // Debug logging for Delivery Scheduled orders that don't match param2
-            // Calculate param2 for this order to show in log (using PickupAt)
-            const pickupTimeMsDebug = deliveryTimeMs - 20 * 60 * 1000; // PickupAt = DeliveryAt - 20 minutes
-            const pickupTimeDebug = new Date(pickupTimeMsDebug);
-            const param2StartDebug = new Date(pickupTimeMsDebug - 3 * 60 * 1000);
-            const param2EndDebug = new Date(pickupTimeMsDebug + 3 * 60 * 1000);
-            logMessage(`  ⚠ Order ${delivery.orderNumber} has "Delivery Scheduled" status but inParam2=${inParam2}`);
-            logMessage(`    Delivery time (DeliveryAt): ${deliveryTime.toLocaleTimeString()} (${deliveryTime.getTime()})`);
-            logMessage(`    Pickup time (PickupAt, approximated): ${pickupTimeDebug.toLocaleTimeString()} (${pickupTimeMsDebug})`);
-            logMessage(`    Current time (EST): ${currentTime.toLocaleTimeString()} (${currentTimeMs})`);
-            logMessage(`    Param2 range for this order (based on PickupAt): ${param2StartDebug.toLocaleTimeString()} to ${param2EndDebug.toLocaleTimeString()}`);
-            logMessage(`    Current time (EST) in param2 range: ${currentTimeMs >= param2StartDebug.getTime() && currentTimeMs <= param2EndDebug.getTime()}`);
-          }
-          
-          // Rule 3: If order is in specified status AND delivery time < current time, mark for click
-          // This applies to both "En Route to Customer" and "Delivery Scheduled"
-          // This ensures any order with these statuses that has passed the current time is clicked
-          if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
-            // Only set rule3 if not already set by param1 or param2
-            if (!shouldClick) {
-              shouldClick = true;
-              actionType = 'rule3';
-              reason = `Delivery time < current time AND status is ${status}`;
-              logMessage(`  ✓ Rule 3 matched: Order ${delivery.orderNumber} has passed current time with status "${status}"`);
-            }
-          }
-        } else {
-          logMessage(`  No status found for order ${delivery.orderNumber}`, 'WARNING');
         }
         
         results.push({
-          orderNumber: delivery.orderNumber,
-          timeText: delivery.timeText,
-          status: status,
+          orderNumber: orderNumber,
+          timeText: timeText,
+          status: status, // Status from page
           shouldClick: shouldClick,
           reason: reason,
           actionType: actionType
         });
         
         if (shouldClick) {
-          logMessage(`  ✓ Order ${delivery.orderNumber} (${delivery.timeText}, status: ${status}) - WILL CLICK: ${reason}`);
+          logMessage(`  ✓ Order ${orderNumber} (${timeText}) - WILL CLICK: ${reason}`);
         } else {
-          logMessage(`  - Order ${delivery.orderNumber} (${delivery.timeText}, status: ${status}) - SKIP: ${reason}`);
+          logMessage(`  - Order ${orderNumber} (${timeText}) - SKIP: ${reason}`);
         }
       } catch (error: any) {
-        logMessage(`  ✗ Error processing order ${delivery.orderNumber}: ${error.message}`, 'ERROR');
+        logMessage(`  ✗ Error processing order from API: ${error.message}`, 'ERROR');
         // Still add to results so we know we reviewed it
+        // Extract ticket from Business.Ticket field using regex (returns XXX-XXX format)
+        const extractedTicket = extractTicketFromApiResponse(apiOrder.Business?.Ticket);
+        // Add # prefix to create orderNumber (format: #XXX-XXX)
+        const orderNumber = extractedTicket ? `#${extractedTicket}` : `#${apiOrder.ShortId || apiOrder.Id}`;
         results.push({
-          orderNumber: delivery.orderNumber,
-          timeText: delivery.timeText,
+          orderNumber: orderNumber,
+          timeText: apiOrder.DeliveryAt || 'Unknown',
           status: null,
           shouldClick: false,
           reason: `Error: ${error.message}`,
@@ -1101,7 +1561,188 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
       }
     }
     
-    logMessage(`\n✓ Finished reviewing all ${deliveryData.length} order(s) in "Today" section`);
+    // Process orders that are on the page but not in the API (fallback)
+    for (const missingTicket of missingOrders) {
+      try {
+        const orderNumber = `#${missingTicket}`;
+        logMessage(`Processing missing order ${orderNumber} with fallback (using page time)...`);
+        logMessage(`  🔄 Using FALLBACK (page data) for this order`);
+        
+        // Get time from page
+        const pageTimeData = await getOrderTimeFromPage(page, orderNumber);
+        if (!pageTimeData) {
+          logMessage(`  ⚠ Could not get time from page for order ${orderNumber}, skipping`, 'WARNING');
+          results.push({
+            orderNumber: orderNumber,
+            timeText: 'Unknown',
+            status: null,
+            shouldClick: false,
+            reason: 'Could not get time from page',
+            actionType: null
+          });
+          continue;
+        }
+        
+        const pageTime = pageTimeData.parsedDate;
+        const pageTimeMs = pageTime.getTime();
+        const timeText = formatDeliveryTime(pageTime);
+        
+        logMessage(`  Order ${orderNumber} - Page time: ${timeText} (${pageTime.toLocaleTimeString()})`);
+        
+        // Get delivery status from page - ONLY search within "Today" section
+        let status: string | null = null;
+        try {
+          const deliveryItemHandle = await page.evaluateHandle((orderNum) => {
+            // Find "Today" section first
+            const h2Elements = Array.from(document.querySelectorAll('h2'));
+            const todayH2 = h2Elements.find(h2 => {
+              const text = h2.textContent?.trim();
+              return text === 'Today';
+            });
+            
+            if (!todayH2) return null;
+            
+            // Find the container for "Today" section
+            let todayContainer: HTMLElement | null = null;
+            let container = todayH2.parentElement;
+            while (container && container !== document.body) {
+              if (container.firstElementChild === todayH2) {
+                todayContainer = container as HTMLElement;
+                break;
+              }
+              container = container.parentElement;
+            }
+            
+            if (!todayContainer) return null;
+            
+            // Only search for order containers within "Today" section
+            const allDeliveryContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
+            for (const container of allDeliveryContainers) {
+              const orderDiv = container.querySelector('div.ez-7crqac');
+              if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+                return container as HTMLElement;
+              }
+            }
+            return null;
+          }, orderNumber);
+          
+          const itemValue = await deliveryItemHandle.jsonValue();
+          
+          if (itemValue) {
+            status = await getDeliveryStatus(page, itemValue as HTMLElement, orderNumber);
+            if (status) {
+              logMessage(`  ✓ Found status "${status}" for order ${orderNumber}`);
+            } else {
+              logMessage(`  ⚠ Status not found for order ${orderNumber}`, 'WARNING');
+            }
+          } else {
+            logMessage(`  ⚠ Could not find delivery container for order ${orderNumber}`, 'WARNING');
+          }
+          
+          await deliveryItemHandle.dispose();
+        } catch (statusError: any) {
+          logMessage(`  Error getting status for ${orderNumber}: ${statusError.message}`, 'WARNING');
+        }
+        
+        // TEMPORARILY DISABLED FOR TESTING: Skip status check
+        // SKIP if status is not "Delivery Scheduled" or "En Route to Customer"
+        /*
+        if (status !== 'Delivery Scheduled' && status !== 'En Route to Customer') {
+          logMessage(`  ⏭ SKIPPING order ${orderNumber} - Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`);
+          results.push({
+            orderNumber: orderNumber,
+            timeText: timeText,
+            status: status,
+            shouldClick: false,
+            reason: `Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`,
+            actionType: null
+          });
+          continue;
+        }
+        */
+        
+        // Calculate time comparisons
+        const currentTimeMs = currentTime.getTime();
+        
+        // Param1: Use the page time (hora marcada)
+        const param1Start = new Date(pageTimeMs - 3 * 60 * 1000);
+        const param1End = new Date(pageTimeMs + 3 * 60 * 1000);
+        const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
+        
+        // Param2: Use page time - 20 minutes
+        const param2Base = new Date(pageTimeMs - 20 * 60 * 1000);
+        const param2Start = new Date(param2Base.getTime() - 3 * 60 * 1000);
+        const param2End = new Date(param2Base.getTime() + 3 * 60 * 1000);
+        const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
+        
+        const currentTimeGreater = currentTimeMs > pageTimeMs;
+        
+        logMessage(`  Status: ${status}, InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
+        logMessage(`  Current time (EST): ${currentTime.toLocaleTimeString()} (${currentTimeMs})`);
+        logMessage(`  Page time: ${pageTime.toLocaleTimeString()} (${pageTimeMs})`);
+        logMessage(`  Param1 range (based on page time): ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()}`);
+        logMessage(`  Param2 range (based on page time - 20 min): ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()}`);
+        
+        // TEMPORARILY DISABLED FOR TESTING: Status checks are ignored
+        // Check if should click based on rules (status checks disabled)
+        let shouldClick = false;
+        let reason = '';
+        let actionType: 'param1' | 'param2' | 'rule3' | null = null;
+        
+        // Rule 1: Orders in param1 range (temporarily ignoring status)
+        if (inParam1) {
+          shouldClick = true;
+          actionType = 'param1';
+          reason = 'Param1 range (FALLBACK - page data - status check disabled for testing)';
+          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range (status check disabled)`);
+        }
+        
+        // Rule 2: Orders in param2 range (temporarily ignoring status)
+        if (inParam2) {
+          shouldClick = true;
+          actionType = 'param2';
+          reason = 'Param2 range (FALLBACK - page data - status check disabled for testing)';
+          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range (status check disabled)`);
+        }
+        
+        // Rule 3: If page time < current time (temporarily ignoring status)
+        if (currentTimeGreater) {
+          if (!shouldClick) {
+            shouldClick = true;
+            actionType = 'rule3';
+            reason = `Page time < current time (FALLBACK - page data - status check disabled for testing)`;
+            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed page time (status check disabled)`);
+          }
+        }
+        
+        results.push({
+          orderNumber: orderNumber,
+          timeText: timeText,
+          status: status, // Status from page
+          shouldClick: shouldClick,
+          reason: reason || 'No rules matched',
+          actionType: actionType
+        });
+        
+        if (shouldClick) {
+          logMessage(`  ✓ Order ${orderNumber} (${timeText}) - WILL CLICK: ${reason}`);
+        } else {
+          logMessage(`  - Order ${orderNumber} (${timeText}) - SKIP: ${reason}`);
+        }
+      } catch (error: any) {
+        logMessage(`  ✗ Error processing missing order ${missingTicket}: ${error.message}`, 'ERROR');
+        results.push({
+          orderNumber: `#${missingTicket}`,
+          timeText: 'Unknown',
+          status: null,
+          shouldClick: false,
+          reason: `Error: ${error.message}`,
+          actionType: null
+        });
+      }
+    }
+    
+    logMessage(`\n✓ Finished reviewing ${apiOrders.length} order(s) from API and ${missingOrders.length} missing order(s) with fallback`);
     
   } catch (error: any) {
     logMessage(`Error processing continuous deliveries: ${error.message}`, 'ERROR');
@@ -1740,11 +2381,11 @@ async function testContinuous(): Promise<void> {
   // Initialize log file for this execution
   currentLogFile = initializeLogFile();
   
-  logMessage('Starting continuous delivery monitoring with button actions...');
+  logMessage('Starting continuous delivery monitoring with button actions (V3 - API-based)...');
   logMessage(`Check interval: 60 seconds (1 minute)`);
   
   // Initialize browser
-  const browserResult = await initBrowser(config.task.url, 'continuous-test-v2');
+  const browserResult = await initBrowser(config.task.url, 'continuous-test-v3');
   
   if (browserResult.error || !browserResult.browser || !browserResult.page || !browserResult.profile) {
     logMessage(`Failed to initialize browser: ${browserResult.error}`, 'ERROR');
@@ -1815,10 +2456,10 @@ async function testContinuous(): Promise<void> {
         // Deliveries are now available, continue with processing
       }
       
-      // Process deliveries - this processes ALL orders in "Today" section
+      // Process deliveries - V3: Uses API instead of DOM extraction
       const deliveries = await processContinuousDeliveries(page);
       
-      logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) in "Today" section`);
+      logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) from API`);
       
       // Log detection cycle header with total count and separator
       logDetectionCycleHeader(deliveries.length);
@@ -1835,6 +2476,17 @@ async function testContinuous(): Promise<void> {
       logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
       logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
       
+      // TEMPORARILY DISABLED: Click processing is disabled
+      logMessage(`\n⚠️  CLICK PROCESSING IS TEMPORARILY DISABLED ⚠️`);
+      logMessage(`  Would have processed ${eligibleToClick.length} eligible order(s):`);
+      for (const delivery of eligibleToClick) {
+        const actionTypeDesc = delivery.actionType === 'param2' ? 'param2 (only "I\'m on my way")' : 
+                               delivery.actionType === 'param1' ? 'param1 (full process)' :
+                               delivery.actionType === 'rule3' ? 'rule3 (full process)' : 'unknown';
+        logMessage(`    - ${delivery.orderNumber} (${actionTypeDesc}): ${delivery.reason}`);
+      }
+      
+      /* TEMPORARILY DISABLED - CLICK PROCESSING
       // IMPORTANT: Process eligible orders, but limit to 1 click per order per cycle
       // Track which orders have been clicked in this cycle
       const clickedOrdersThisCycle = new Set<string>();
@@ -1923,12 +2575,12 @@ async function testContinuous(): Promise<void> {
           await waitRandomTime(500, 1000);
         }
       }
+      */
       
       // Log final summary of this cycle
       logMessage(`\n📊 Cycle processing complete:`);
       logMessage(`  - Total orders reviewed: ${deliveries.length}`);
-      logMessage(`  - Successfully clicked: ${clickedCount}`);
-      logMessage(`  - Failed clicks: ${failedCount}`);
+      logMessage(`  - Click processing: DISABLED (would have processed ${eligibleToClick.length} order(s))`);
       logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
       
       logMessage(`\n=== Check cycle completed ===`);
