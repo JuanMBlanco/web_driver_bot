@@ -1440,9 +1440,7 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
           // Continue processing even if status couldn't be retrieved
         }
         
-        // TEMPORARILY DISABLED FOR TESTING: Skip status check
         // SKIP if status is not "Delivery Scheduled" or "En Route to Customer"
-        /*
         if (status !== 'Delivery Scheduled' && status !== 'En Route to Customer') {
           logMessage(`  ⏭ SKIPPING order ${orderNumber} - Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`);
           results.push({
@@ -1455,7 +1453,6 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
           });
           continue;
         }
-        */
         
         // Parse times for comparison
         const deliveryTime = deliveryAtDate;
@@ -1500,31 +1497,31 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
         logMessage(`  Param1 range (based on DeliveryAt): ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()}`);
         logMessage(`  Param2 range (based on PickupAt): ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()}`);
         
-        // TEMPORARILY DISABLED FOR TESTING: Status checks are ignored
-        // Rule 1: Orders in param1 range (temporarily ignoring status)
-        if (inParam1) {
+        // Rule 1: Orders in param1 range AND status is "En Route to Customer"
+        if (inParam1 && status === 'En Route to Customer') {
           shouldClick = true;
           actionType = 'param1';
-          reason = 'Param1 range (API data - status check disabled for testing)';
-          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range (status check disabled)`);
+          reason = 'Param1 range AND En Route to Customer (verified element)';
+          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range with "En Route to Customer" status`);
         }
         
-        // Rule 2: Orders in param2 range (temporarily ignoring status)
-        if (inParam2) {
+        // Rule 2: Orders in param2 range AND status is "Delivery Scheduled"
+        if (inParam2 && status === 'Delivery Scheduled') {
           shouldClick = true;
           actionType = 'param2';
-          reason = 'Param2 range (API data - status check disabled for testing)';
-          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range (status check disabled)`);
+          reason = 'Param2 range AND Delivery Scheduled (verified element)';
+          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with "Delivery Scheduled" status`);
         }
         
-        // Rule 3: If delivery time < current time (temporarily ignoring status)
-        if (currentTimeGreater) {
+        // Rule 3: If order is in specified status AND delivery time < current time, mark for click
+        // This applies to both "En Route to Customer" and "Delivery Scheduled"
+        if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
           // Only set rule3 if not already set by param1 or param2
           if (!shouldClick) {
             shouldClick = true;
             actionType = 'rule3';
-            reason = `Delivery time < current time (API data - status check disabled for testing)`;
-            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed current time (status check disabled)`);
+            reason = `Delivery time < current time AND status is ${status}`;
+            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed current time with status "${status}"`);
           }
         }
         
@@ -1644,9 +1641,7 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
           logMessage(`  Error getting status for ${orderNumber}: ${statusError.message}`, 'WARNING');
         }
         
-        // TEMPORARILY DISABLED FOR TESTING: Skip status check
         // SKIP if status is not "Delivery Scheduled" or "En Route to Customer"
-        /*
         if (status !== 'Delivery Scheduled' && status !== 'En Route to Customer') {
           logMessage(`  ⏭ SKIPPING order ${orderNumber} - Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`);
           results.push({
@@ -1659,7 +1654,6 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
           });
           continue;
         }
-        */
         
         // Calculate time comparisons
         const currentTimeMs = currentTime.getTime();
@@ -1683,35 +1677,34 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
         logMessage(`  Param1 range (based on page time): ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()}`);
         logMessage(`  Param2 range (based on page time - 20 min): ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()}`);
         
-        // TEMPORARILY DISABLED FOR TESTING: Status checks are ignored
-        // Check if should click based on rules (status checks disabled)
+        // Check if should click based on rules (with status checks)
         let shouldClick = false;
         let reason = '';
         let actionType: 'param1' | 'param2' | 'rule3' | null = null;
         
-        // Rule 1: Orders in param1 range (temporarily ignoring status)
-        if (inParam1) {
+        // Rule 1: Orders in param1 range AND status is "En Route to Customer"
+        if (inParam1 && status === 'En Route to Customer') {
           shouldClick = true;
           actionType = 'param1';
-          reason = 'Param1 range (FALLBACK - page data - status check disabled for testing)';
-          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range (status check disabled)`);
+          reason = 'Param1 range AND En Route to Customer (verified element - fallback)';
+          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range with "En Route to Customer" status`);
         }
         
-        // Rule 2: Orders in param2 range (temporarily ignoring status)
-        if (inParam2) {
+        // Rule 2: Orders in param2 range AND status is "Delivery Scheduled"
+        if (inParam2 && status === 'Delivery Scheduled') {
           shouldClick = true;
           actionType = 'param2';
-          reason = 'Param2 range (FALLBACK - page data - status check disabled for testing)';
-          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range (status check disabled)`);
+          reason = 'Param2 range AND Delivery Scheduled (verified element - fallback)';
+          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with "Delivery Scheduled" status`);
         }
         
-        // Rule 3: If page time < current time (temporarily ignoring status)
-        if (currentTimeGreater) {
+        // Rule 3: If order is in specified status AND page time < current time, mark for click
+        if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
           if (!shouldClick) {
             shouldClick = true;
             actionType = 'rule3';
-            reason = `Page time < current time (FALLBACK - page data - status check disabled for testing)`;
-            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed page time (status check disabled)`);
+            reason = `Page time < current time AND status is ${status} (fallback)`;
+            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed page time with status "${status}"`);
           }
         }
         
@@ -1967,9 +1960,9 @@ async function performOrderActions(page: puppeteer.Page, orderNumber: string, fu
       logMessage(`  Could not click "I'm on my way" button, continuing anyway...`, 'WARNING');
     }
     
-    // If only param2 (not full process), stop here
+    // If only param2 (not full process), stop here - DO NOT continue with "Delivery is done" or "Confirm"
     if (!fullProcess) {
-      logMessage(`  ✓ Completed actions for order ${orderNumber} (param2 - only "I'm on my way")`);
+      logMessage(`  ✓ Completed actions for order ${orderNumber} (param2 - ONLY clicked "I'm on my way", skipping "Delivery is done" and "Confirm")`);
       return true;
     }
     
@@ -2476,17 +2469,6 @@ async function testContinuous(): Promise<void> {
       logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
       logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
       
-      // TEMPORARILY DISABLED: Click processing is disabled
-      logMessage(`\n⚠️  CLICK PROCESSING IS TEMPORARILY DISABLED ⚠️`);
-      logMessage(`  Would have processed ${eligibleToClick.length} eligible order(s):`);
-      for (const delivery of eligibleToClick) {
-        const actionTypeDesc = delivery.actionType === 'param2' ? 'param2 (only "I\'m on my way")' : 
-                               delivery.actionType === 'param1' ? 'param1 (full process)' :
-                               delivery.actionType === 'rule3' ? 'rule3 (full process)' : 'unknown';
-        logMessage(`    - ${delivery.orderNumber} (${actionTypeDesc}): ${delivery.reason}`);
-      }
-      
-      /* TEMPORARILY DISABLED - CLICK PROCESSING
       // IMPORTANT: Process eligible orders, but limit to 1 click per order per cycle
       // Track which orders have been clicked in this cycle
       const clickedOrdersThisCycle = new Set<string>();
@@ -2575,12 +2557,12 @@ async function testContinuous(): Promise<void> {
           await waitRandomTime(500, 1000);
         }
       }
-      */
       
       // Log final summary of this cycle
       logMessage(`\n📊 Cycle processing complete:`);
       logMessage(`  - Total orders reviewed: ${deliveries.length}`);
-      logMessage(`  - Click processing: DISABLED (would have processed ${eligibleToClick.length} order(s))`);
+      logMessage(`  - Clicked successfully: ${clickedCount}`);
+      logMessage(`  - Failed to click: ${failedCount}`);
       logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
       
       logMessage(`\n=== Check cycle completed ===`);
