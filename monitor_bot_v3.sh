@@ -46,19 +46,24 @@ is_log_keeper_running() {
 
 # Iniciar el keeper de logs (mantiene la terminal siempre abierta)
 start_log_keeper() {
-    # Si ya está corriendo, verificar que realmente está corriendo
-    if is_log_keeper_running; then
-        # Verificar también que no hay múltiples instancias
-        local keeper_count=$(pgrep -f "keep_logs_open.sh" | wc -l)
+    # Verificar que no hay múltiples instancias del keeper
+    local keeper_count=$(pgrep -f "keep_logs_open.sh" 2>/dev/null | wc -l)
+    if [ "$keeper_count" -gt 0 ]; then
         if [ "$keeper_count" -gt 1 ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Múltiples instancias del keeper detectadas. Limpiando..."
-            # Matar todas las instancias excepto la actual
-            pkill -f "keep_logs_open.sh" 2>/dev/null || true
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Múltiples instancias del keeper detectadas ($keeper_count). Limpiando todas..."
+            pkill -9 -f "keep_logs_open.sh" 2>/dev/null || true
+            sleep 3
+            rm -f "$KEEPER_PID_FILE"
+            rm -f /tmp/ezcater_bot_v3_keeper.lock
+        elif is_log_keeper_running; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Keeper de logs ya está corriendo correctamente"
+            return 0
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Proceso keeper encontrado pero no válido. Limpiando..."
+            pkill -9 -f "keep_logs_open.sh" 2>/dev/null || true
             sleep 2
             rm -f "$KEEPER_PID_FILE"
-        else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Keeper de logs ya está corriendo"
-            return 0
+            rm -f /tmp/ezcater_bot_v3_keeper.lock
         fi
     fi
     
@@ -123,6 +128,12 @@ stop_log_keeper() {
         fi
         rm -f "$LOG_TERMINAL_PID_FILE"
     fi
+    
+    # Cerrar todas las terminales con el título (por si hay múltiples)
+    pkill -9 -f "EZCater Bot V3 - Logs" 2>/dev/null || true
+    
+    # Limpiar lock file
+    rm -f /tmp/ezcater_bot_v3_keeper.lock
     
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Keeper de logs detenido"
     return 0

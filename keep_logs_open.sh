@@ -5,6 +5,7 @@
 BOT_NAME="ezcater_bot_v3"
 LOG_TERMINAL_PID_FILE="/tmp/ezcater_bot_v3_log_terminal.pid"
 KEEPER_PID_FILE="/tmp/ezcater_bot_v3_log_keeper.pid"
+LOCK_FILE="/tmp/ezcater_bot_v3_keeper.lock"
 
 # Cargar nvm
 export NVM_DIR="$HOME/.nvm"
@@ -83,18 +84,27 @@ is_terminal_open() {
 open_terminal() {
     # Verificar primero si ya hay una terminal abierta
     if is_terminal_open; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Terminal ya está abierta, no se abrirá otra"
         return 0
+    fi
+    
+    # Verificar que no haya múltiples terminales abiertas
+    local terminal_count=$(pgrep -f "EZCater Bot V3 - Logs" 2>/dev/null | wc -l)
+    if [ "$terminal_count" -gt 0 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Encontradas $terminal_count terminales abiertas. Cerrando todas..."
+        pkill -9 -f "EZCater Bot V3 - Logs" 2>/dev/null || true
+        sleep 2
+        rm -f "$LOG_TERMINAL_PID_FILE"
     fi
     
     local terminal=$(detect_terminal)
     
     if [ -z "$terminal" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] No se encontró terminal disponible"
         return 1
     fi
     
-    # Cerrar cualquier terminal huérfana con el mismo título
-    pkill -f "EZCater Bot V3 - Logs" 2>/dev/null || true
-    sleep 1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Abriendo terminal única..."
     
     local term_pid=""
     
@@ -132,29 +142,46 @@ open_terminal() {
     esac
     
     # Esperar un momento y buscar el PID real de la terminal
-    sleep 3
+    sleep 4
     
-    # Buscar el PID real de la terminal por su título
+    # Buscar el PID real de la terminal por su título (solo UNA)
     local real_pid=""
     case "$terminal" in
         xfce4-terminal|gnome-terminal|xterm|konsole)
-            # Buscar el proceso de la terminal por su comando
+            # Buscar el proceso de la terminal por su comando (solo el primero)
             real_pid=$(pgrep -f "EZCater Bot V3 - Logs" | head -1)
             ;;
     esac
     
+    # Verificar que solo hay UNA terminal
+    local final_count=$(pgrep -f "EZCater Bot V3 - Logs" 2>/dev/null | wc -l)
+    if [ "$final_count" -gt 1 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ ERROR: Se abrieron múltiples terminales ($final_count). Cerrando todas..."
+        pkill -9 -f "EZCater Bot V3 - Logs" 2>/dev/null || true
+        sleep 2
+        rm -f "$LOG_TERMINAL_PID_FILE"
+        return 1
+    fi
+    
     # Si encontramos un PID real, usarlo; si no, usar el PID del proceso hijo
     if [ -n "$real_pid" ]; then
         echo "$real_pid" > "$LOG_TERMINAL_PID_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Terminal abierta con PID: $real_pid"
     elif [ -n "$term_pid" ]; then
         echo "$term_pid" > "$LOG_TERMINAL_PID_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Terminal abierta con PID: $term_pid"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ No se pudo obtener el PID de la terminal"
+        return 1
     fi
     
     # Verificar que la terminal está realmente abierta
     sleep 1
     if is_terminal_open; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Terminal verificada y funcionando"
         return 0
     else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Terminal no se pudo verificar"
         rm -f "$LOG_TERMINAL_PID_FILE"
         return 1
     fi
@@ -176,18 +203,27 @@ keep_logs_open() {
                 # Terminal está abierta, no hacer nada
             else
                 # Terminal no está abierta
+                # Verificar que no haya múltiples terminales antes de abrir una nueva
+                local term_count=$(pgrep -f "EZCater Bot V3 - Logs" 2>/dev/null | wc -l)
+                if [ "$term_count" -gt 0 ]; then
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Encontradas $term_count terminales pero no detectadas correctamente. Limpiando..."
+                    pkill -9 -f "EZCater Bot V3 - Logs" 2>/dev/null || true
+                    rm -f "$LOG_TERMINAL_PID_FILE"
+                    sleep 3
+                fi
+                
                 if [ "$terminal_was_open" = "true" ]; then
                     # La terminal se cerró, esperar un poco antes de reabrir
                     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Terminal cerrada. Esperando antes de reabrir..."
-                    sleep 3
+                    sleep 5
                 fi
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Abriendo terminal..."
                 if open_terminal; then
                     terminal_was_open=true
-                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Terminal abierta correctamente"
                 else
-                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error al abrir terminal, reintentando en 10 segundos..."
-                    sleep 10
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error al abrir terminal, reintentando en 15 segundos..."
+                    terminal_was_open=false
+                    sleep 15
                 fi
             fi
         else
@@ -212,8 +248,41 @@ keep_logs_open() {
     done
 }
 
+# Verificar si ya hay otra instancia corriendo
+check_existing_instance() {
+    # Verificar lock file
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        if [ -n "$lock_pid" ] && ps -p "$lock_pid" > /dev/null 2>&1; then
+            # Hay otra instancia corriendo
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Otra instancia del keeper ya está corriendo (PID: $lock_pid)"
+            exit 0
+        else
+            # Lock file huérfano, eliminarlo
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    
+    # Verificar por nombre de proceso
+    local existing_pids=$(pgrep -f "keep_logs_open.sh" | grep -v $$)
+    if [ -n "$existing_pids" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Encontradas otras instancias del keeper. Deteniéndolas..."
+        echo "$existing_pids" | xargs kill 2>/dev/null || true
+        sleep 2
+        # Forzar si aún existen
+        local still_running=$(pgrep -f "keep_logs_open.sh" | grep -v $$)
+        if [ -n "$still_running" ]; then
+            echo "$still_running" | xargs kill -9 2>/dev/null || true
+        fi
+        sleep 1
+    fi
+}
+
 # Manejar señales para limpiar
 cleanup() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Limpiando y cerrando keeper..."
+    
+    # Cerrar terminal si está abierta
     if [ -f "$LOG_TERMINAL_PID_FILE" ]; then
         local pid=$(cat "$LOG_TERMINAL_PID_FILE" 2>/dev/null)
         if [ -n "$pid" ]; then
@@ -221,11 +290,24 @@ cleanup() {
         fi
         rm -f "$LOG_TERMINAL_PID_FILE"
     fi
+    
+    # Cerrar todas las terminales con el título
+    pkill -f "EZCater Bot V3 - Logs" 2>/dev/null || true
+    
+    # Limpiar archivos
     rm -f "$KEEPER_PID_FILE"
+    rm -f "$LOCK_FILE"
+    
     exit 0
 }
 
-trap cleanup SIGTERM SIGINT
+trap cleanup SIGTERM SIGINT EXIT
+
+# Verificar instancias existentes antes de iniciar
+check_existing_instance
+
+# Crear lock file
+echo $$ > "$LOCK_FILE"
 
 # Guardar PID del keeper
 echo $$ > "$KEEPER_PID_FILE"

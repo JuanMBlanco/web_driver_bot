@@ -9,7 +9,10 @@ echo ""
 # 1. Detener todos los keepers
 echo "1. Deteniendo todos los keepers de logs..."
 pkill -9 -f "keep_logs_open.sh" 2>/dev/null || true
-sleep 2
+sleep 3
+# Limpiar lock files
+rm -f /tmp/ezcater_bot_v3_keeper.lock
+rm -f /tmp/ezcater_bot_v3_log_keeper.pid
 echo "   ✓ Keepers detenidos"
 echo ""
 

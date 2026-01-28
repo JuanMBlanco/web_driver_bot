@@ -17,7 +17,9 @@ echo ""
 # Detener keepers
 echo "   → Deteniendo keepers de logs..."
 pkill -9 -f "keep_logs_open.sh" 2>/dev/null || true
-sleep 2
+sleep 3
+# Limpiar lock files
+rm -f /tmp/ezcater_bot_v3_keeper.lock
 
 # Cerrar todas las terminales
 echo "   → Cerrando terminales del bot..."
@@ -42,6 +44,7 @@ echo ""
 echo "2. Limpiando archivos temporales..."
 rm -f "$KEEPER_PID_FILE"
 rm -f "$TERMINAL_PID_FILE"
+rm -f /tmp/ezcater_bot_v3_keeper.lock
 rm -f /tmp/ezcater_log_keeper.log
 echo "   ✓ Archivos temporales limpiados"
 echo ""
