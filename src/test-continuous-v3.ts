@@ -1279,15 +1279,20 @@ async function getDeliveryStatusFromPage(page: puppeteer.Page, orderNumber: stri
 /**
  * Process delivery orders with continuous monitoring logic
  * V3: Uses API instead of DOM extraction
+ * Returns both the results and the current time EST used for comparisons
  */
-async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>> {
+async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ results: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>, currentTimeEST: Date }> {
   const results: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }> = [];
+  
+  // Get current time - convert to EST (this is the time used for all comparisons)
+  // Declare outside try so it's available in the return statement
+  let currentTime: Date = getCurrentTimeEST();
   
   try {
     logMessage('Processing deliveries for continuous monitoring (using API)...');
     
-    // Get current time - convert to EST (this is the time used for all comparisons)
-    const currentTime = getCurrentTimeEST();
+    // Update current time at the start of processing
+    currentTime = getCurrentTimeEST();
     const currentTimeMs = currentTime.getTime();
     
     logMessage(`Current time (EST - used for comparisons): ${currentTime.toLocaleTimeString()}`);
@@ -1300,7 +1305,7 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
     
     if (orderTickets.length === 0) {
       logMessage('No order tickets detected from page, skipping API call', 'WARNING');
-      return results;
+      return { results, currentTimeEST: currentTime };
     }
     
     // Get all orders from API using detected tickets
@@ -1308,7 +1313,7 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
     
     if (!apiOrders || apiOrders.length === 0) {
       logMessage('No orders found from API', 'WARNING');
-      return results;
+      return { results, currentTimeEST: currentTime };
     }
     
     logMessage(`Found ${apiOrders.length} order(s) from API`);
@@ -1741,7 +1746,8 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<Array<
     logMessage(`Error processing continuous deliveries: ${error.message}`, 'ERROR');
   }
   
-  return results;
+  // Return results and the current time EST used for comparisons
+  return { results, currentTimeEST: currentTime };
 }
 
 /**
@@ -2275,7 +2281,8 @@ function logClickedOrder(orderNumber: string, timeText: string, status: string |
     const config = loadConfig();
     mkdirSync(config.paths.dataPath, { recursive: true });
     
-    const timestamp = new Date().toISOString();
+    // Use EST format instead of UTC
+    const timestamp = formatDateToESTISO(new Date());
     const logLine = `${timestamp} | Order: ${orderNumber} | Time: ${timeText} | Status: ${status || 'Unknown'} | Reason: ${reason}\n`;
     
     const logFilePath = path.join(config.paths.dataPath, 'clicked_orders.log');
@@ -2300,13 +2307,26 @@ function initializeLogFile(): string {
     }
     
     const now = new Date();
-    // Format: YYYY-MM-DD_HH-MM-SS
-    const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
-    const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
+    // Format: YYYY-MM-DD_HH-MM-SS (using EST time for filename)
+    const estNow = getCurrentTimeEST();
+    const dateStr = estNow.toISOString().split('T')[0]; // YYYY-MM-DD (from EST)
+    // Get time components from EST
+    const estFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    const timeParts = estFormatter.formatToParts(estNow);
+    const hour = timeParts.find(p => p.type === 'hour')?.value || '00';
+    const minute = timeParts.find(p => p.type === 'minute')?.value || '00';
+    const second = timeParts.find(p => p.type === 'second')?.value || '00';
+    const timeStr = `${hour}-${minute}-${second}`;
     const logFile = path.join(logDir, `detected_orders_${dateStr}_${timeStr}.log`);
     
-    // Write header to log file
-    const header = `# Detection session started: ${now.toISOString()}\n`;
+    // Write header to log file (using EST format)
+    const header = `# Detection session started: ${formatDateToESTISO(now)}\n`;
     writeFileSync(logFile, header, 'utf8');
     
     logMessage(`Log file initialized: ${path.basename(logFile)}`);
@@ -2318,16 +2338,69 @@ function initializeLogFile(): string {
 }
 
 /**
- * Log detection cycle header with total count and separator
+ * Format Date to ISO string in EST timezone
+ * Returns format: YYYY-MM-DDTHH:mm:ss.sss-05:00 (or -04:00 for EDT)
  */
-function logDetectionCycleHeader(totalOrders: number): void {
+function formatDateToESTISO(date: Date): string {
+  // Use Intl.DateTimeFormat to get date components in EST
+  const estFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  
+  // Format the date parts
+  const parts = estFormatter.formatToParts(date);
+  const year = parts.find(p => p.type === 'year')?.value || '0000';
+  const month = parts.find(p => p.type === 'month')?.value || '00';
+  const day = parts.find(p => p.type === 'day')?.value || '00';
+  const hour = parts.find(p => p.type === 'hour')?.value || '00';
+  const minute = parts.find(p => p.type === 'minute')?.value || '00';
+  const second = parts.find(p => p.type === 'second')?.value || '00';
+  
+  // Get milliseconds
+  const ms = String(date.getMilliseconds()).padStart(3, '0');
+  
+  // Calculate timezone offset for EST/EDT
+  // Create a formatter that shows the timezone abbreviation
+  const tzFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'short'
+  });
+  
+  const tzParts = tzFormatter.formatToParts(date);
+  const tzName = tzParts.find(p => p.type === 'timeZoneName')?.value || '';
+  
+  // Determine offset: EST = -05:00, EDT = -04:00
+  // EST is Eastern Standard Time (UTC-5), EDT is Eastern Daylight Time (UTC-4)
+  const offsetHours = tzName.includes('EDT') ? -4 : -5;
+  const offsetSign = offsetHours >= 0 ? '+' : '-';
+  const offsetHoursStr = String(Math.abs(offsetHours)).padStart(2, '0');
+  const offsetStr = `${offsetSign}${offsetHoursStr}:00`;
+  
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}.${ms}${offsetStr}`;
+}
+
+/**
+ * Log detection cycle header with total count and separator
+ * @param totalOrders - Total number of orders detected
+ * @param cycleTimeEST - Optional: Current time EST used for comparisons in this cycle. If not provided, uses current time.
+ */
+function logDetectionCycleHeader(totalOrders: number, cycleTimeEST?: Date): void {
   try {
     if (!currentLogFile) {
       logMessage('Log file not initialized, initializing now...', 'WARNING');
       currentLogFile = initializeLogFile();
     }
     
-    const timestamp = new Date().toISOString();
+    // Always use current system time for logging (formatDateToESTISO will convert to EST)
+    // Don't use cycleTimeEST directly as it's already in EST format and would cause double conversion
+    const timestamp = formatDateToESTISO(new Date());
     const separator = '='.repeat(80);
     
     // Write separator, total count, and another separator
@@ -2342,15 +2415,21 @@ function logDetectionCycleHeader(totalOrders: number): void {
 /**
  * Log detected order to file
  * Format: código, hora, estado actual
+ * @param orderNumber - Order number (e.g., #321-R4M)
+ * @param timeText - Time text (e.g., 11:30 AM EST)
+ * @param status - Status (e.g., Delivery Scheduled)
+ * @param cycleTimeEST - Optional: Current time EST used for comparisons in this cycle. If not provided, uses current time.
  */
-function logDetectedOrder(orderNumber: string, timeText: string, status: string | null): void {
+function logDetectedOrder(orderNumber: string, timeText: string, status: string | null, cycleTimeEST?: Date): void {
   try {
     if (!currentLogFile) {
       logMessage('Log file not initialized, initializing now...', 'WARNING');
       currentLogFile = initializeLogFile();
     }
     
-    const timestamp = new Date().toISOString();
+    // Always use current system time for logging (formatDateToESTISO will convert to EST)
+    // Don't use cycleTimeEST directly as it's already in EST format and would cause double conversion
+    const timestamp = formatDateToESTISO(new Date());
     const statusText = status || 'N/A';
     
     // Format: timestamp | código | hora | estado
@@ -2450,16 +2529,16 @@ async function testContinuous(): Promise<void> {
       }
       
       // Process deliveries - V3: Uses API instead of DOM extraction
-      const deliveries = await processContinuousDeliveries(page);
+      const { results: deliveries, currentTimeEST } = await processContinuousDeliveries(page);
       
       logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) from API`);
       
-      // Log detection cycle header with total count and separator
-      logDetectionCycleHeader(deliveries.length);
+      // Log detection cycle header with total count and separator (using cycle time EST)
+      logDetectionCycleHeader(deliveries.length, currentTimeEST);
       
-      // Log all detected orders
+      // Log all detected orders (using cycle time EST)
       for (const delivery of deliveries) {
-        logDetectedOrder(delivery.orderNumber, delivery.timeText, delivery.status);
+        logDetectedOrder(delivery.orderNumber, delivery.timeText, delivery.status, currentTimeEST);
       }
       
       // Separate orders into categories

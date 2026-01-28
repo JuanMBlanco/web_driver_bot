@@ -203,7 +203,7 @@ update_existing_app() {
     print_info "Starting application..."
     # Check if app exists in PM2, if not start it with full command
     if pm2 list | grep -q "$APP_NAME"; then
-        pm2 start "$APP_NAME"
+    pm2 start "$APP_NAME"
     else
         cd "$PROJECT_PATH"
         pm2 start npm --name "$APP_NAME" -- start
@@ -468,7 +468,7 @@ fi
 
 # Start the application
 if pm2 start npm --name "\$APP_NAME" -- start; then
-    echo "Application started successfully!"
+echo "Application started successfully!"
     
     # Wait a moment and check status
     sleep 2
