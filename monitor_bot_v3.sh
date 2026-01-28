@@ -46,10 +46,20 @@ is_log_keeper_running() {
 
 # Iniciar el keeper de logs (mantiene la terminal siempre abierta)
 start_log_keeper() {
-    # Si ya está corriendo, no hacer nada
+    # Si ya está corriendo, verificar que realmente está corriendo
     if is_log_keeper_running; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Keeper de logs ya está corriendo"
-        return 0
+        # Verificar también que no hay múltiples instancias
+        local keeper_count=$(pgrep -f "keep_logs_open.sh" | wc -l)
+        if [ "$keeper_count" -gt 1 ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Múltiples instancias del keeper detectadas. Limpiando..."
+            # Matar todas las instancias excepto la actual
+            pkill -f "keep_logs_open.sh" 2>/dev/null || true
+            sleep 2
+            rm -f "$KEEPER_PID_FILE"
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Keeper de logs ya está corriendo"
+            return 0
+        fi
     fi
     
     # Verificar que el script existe
