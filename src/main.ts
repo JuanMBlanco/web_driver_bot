@@ -2,7 +2,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import bodyParser from 'body-parser';
 import fs from 'fs';
-import { mkdirSync, writeFileSync, unlinkSync, readFileSync, statSync, appendFileSync } from 'fs';
+import { mkdirSync, writeFileSync, unlinkSync, readFileSync, statSync, appendFileSync, readdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -572,6 +572,331 @@ function fileExists(filePath: string): boolean {
     return true;
   } catch (_) {
     return false;
+  }
+}
+
+/**
+ * Get the path to a detected orders log file
+ * @param date - Optional date string in YYYY-MM-DD format. If provided, prefers logs for that date.
+ *               If omitted, selects the most recent log based on timestamp in the filename.
+ * @returns Full path to the log file, or null if none is found.
+ */
+function getDetectedOrdersLogPath(date?: string): string | null {
+  try {
+    const logsDir = path.join(projectRoot, 'logs');
+    
+    // Check if logs directory exists
+    if (!fileExists(logsDir)) {
+      logMessage(`Logs directory does not exist: ${logsDir}`, 'WARNING');
+      return null;
+    }
+
+    // Read all files in the logs directory
+    const files = readdirSync(logsDir);
+    
+    // Filter files matching the pattern detected_orders_YYYY-MM-DD_*.log
+    const logFilePattern = /^detected_orders_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})\.log$/;
+    const matchingFiles = files
+      .filter(file => logFilePattern.test(file))
+      .map(file => {
+        const match = file.match(logFilePattern);
+        if (!match) return null;
+        return {
+          filename: file,
+          date: match[1],
+          time: match[2],
+          fullPath: path.join(logsDir, file)
+        };
+      })
+      .filter((item): item is { filename: string; date: string; time: string; fullPath: string } => item !== null);
+
+    if (matchingFiles.length === 0) {
+      logMessage('No detected orders log files found', 'WARNING');
+      return null;
+    }
+
+    // If a specific date is provided, filter to that date
+    if (date) {
+      const dateFiles = matchingFiles.filter(file => file.date === date);
+      if (dateFiles.length === 0) {
+        logMessage(`No detected orders log files found for date: ${date}`, 'WARNING');
+        return null;
+      }
+      // If multiple files for the same date, return the most recent one (by time)
+      dateFiles.sort((a, b) => b.time.localeCompare(a.time));
+      return dateFiles[0].fullPath;
+    }
+
+    // Otherwise, find the most recent file by date and time
+    matchingFiles.sort((a, b) => {
+      const dateCompare = b.date.localeCompare(a.date);
+      if (dateCompare !== 0) return dateCompare;
+      return b.time.localeCompare(a.time);
+    });
+
+    return matchingFiles[0].fullPath;
+  } catch (error: any) {
+    logMessage(`Error getting detected orders log path: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Read the contents of a detected orders log file
+ * @param logPath - Full path to the log file
+ * @returns The file contents as a string
+ * @throws Error if the file cannot be read
+ */
+function readDetectedOrdersLog(logPath: string): string {
+  try {
+    if (!fileExists(logPath)) {
+      throw new Error(`Log file does not exist: ${logPath}`);
+    }
+    return readFileSync(logPath, 'utf8');
+  } catch (error: any) {
+    logMessage(`Error reading detected orders log: ${error.message}`, 'ERROR');
+    throw error;
+  }
+}
+
+/**
+ * Get the path to a report log file (reporte YYYY-MM-DD.txt)
+ * @param date - Optional date string in YYYY-MM-DD format. If omitted, selects the most recent report.
+ * @returns Full path to the report file, or null if none is found.
+ */
+function getReportLogPath(date?: string): string | null {
+  try {
+    const logsDir = path.join(projectRoot, 'logs');
+    if (!fileExists(logsDir)) {
+      logMessage(`Logs directory does not exist: ${logsDir}`, 'WARNING');
+      return null;
+    }
+    const files = readdirSync(logsDir);
+    const reportPattern = /^reporte\s+(\d{4}-\d{2}-\d{2})\.txt$/;
+    const matchingFiles = files
+      .filter(file => reportPattern.test(file))
+      .map(file => {
+        const match = file.match(reportPattern);
+        if (!match) return null;
+        return { filename: file, date: match[1], fullPath: path.join(logsDir, file) };
+      })
+      .filter((item): item is { filename: string; date: string; fullPath: string } => item !== null);
+
+    if (matchingFiles.length === 0) {
+      logMessage('No report files found (reporte YYYY-MM-DD.txt)', 'WARNING');
+      return null;
+    }
+
+    if (date) {
+      const found = matchingFiles.find(f => f.date === date);
+      return found ? found.fullPath : null;
+    }
+    matchingFiles.sort((a, b) => b.date.localeCompare(a.date));
+    return matchingFiles[0].fullPath;
+  } catch (error: any) {
+    logMessage(`Error getting report log path: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Format report log content for Telegram: strip timestamps, fix run-on text, add clear sections.
+ * Splits into multiple messages to stay under Telegram's 4096 character limit (use 4000 to be safe).
+ */
+function formatReportForTelegram(rawReport: string): string[] {
+  const TELEGRAM_MAX_LENGTH = 4000; // Under 4096 to avoid "message too long"
+  const messages: string[] = [];
+
+  // Strip [YYYY-MM-DD HH:MM:SS] [INFO] or [WARNING] from each line
+  const stripPrefix = (line: string): string => {
+    const m = line.match(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(?:INFO|WARNING|ERROR)\]\s*(.*)$/);
+    return m ? m[1].trim() : line.trim();
+  };
+
+  // Make issue lines readable for laymen
+  const cleanLine = (text: string): string => {
+    return text
+      .replace(/^Issue:\s*Missing Food\s*/i, '• Missing: ')
+      .replace(/^Issue:\s*Delivery Issue\s*/i, '• Delivery: ')
+      .replace(/^Issue:\s*/i, '• ');
+  };
+
+  const lines = rawReport.split('\n').map(stripPrefix).map(cleanLine).filter(l => l.length > 0);
+
+  const skipLine = (line: string): boolean => {
+    return /Browser protection|Browser will remain|Closing browser|Shutting down|INTEGRATED Test Completed/i.test(line);
+  };
+
+  const cleanLines: string[] = [];
+  for (const line of lines) {
+    if (skipLine(line)) continue;
+    cleanLines.push(line);
+  }
+  if (cleanLines.length === 0) return ['Report had no readable content.'];
+
+  // Build chunks strictly under TELEGRAM_MAX_LENGTH (line-by-line; split long lines if needed)
+  let chunk = '📊 *Order Processing Report*\n\n';
+  for (const line of cleanLines) {
+    const lineWithNewline = line + '\n';
+    // If a single line exceeds limit, split it into smaller pieces
+    if (line.length > TELEGRAM_MAX_LENGTH - 50) {
+      if (chunk.trim().length > 0) {
+        messages.push(chunk.trim());
+        chunk = '';
+      }
+      for (let i = 0; i < line.length; i += TELEGRAM_MAX_LENGTH - 50) {
+        messages.push(line.slice(i, i + TELEGRAM_MAX_LENGTH - 50));
+      }
+      continue;
+    }
+    if (chunk.length + lineWithNewline.length > TELEGRAM_MAX_LENGTH && chunk.length > 0) {
+      messages.push(chunk.trim());
+      chunk = '📊 *Report (continued)*\n\n' + lineWithNewline;
+    } else {
+      chunk += lineWithNewline;
+    }
+  }
+  if (chunk.trim()) messages.push(chunk.trim());
+  return messages.length > 0 ? messages : ['Report had no readable content.'];
+}
+
+/**
+ * Format detected orders log content into readable Telegram message strings
+ * Extracts key information and splits into multiple messages if needed to avoid Telegram's 4096 character limit
+ * @param rawLog - Raw log file content as a string
+ * @returns Array of formatted message strings ready to send via Telegram
+ */
+function formatDetectedOrdersForTelegram(rawLog: string): string[] {
+  const messages: string[] = [];
+  const TELEGRAM_MAX_LENGTH = 4096;
+  
+  try {
+    const lines = rawLog.split('\n').filter(line => line.trim() !== '');
+    
+    if (lines.length === 0) {
+      return ['No orders detected in log file'];
+    }
+    
+    // Extract session start time (first line with "# Detection session started:")
+    let sessionStart = '';
+    const sessionStartLine = lines.find(line => line.includes('# Detection session started:'));
+    if (sessionStartLine) {
+      const match = sessionStartLine.match(/# Detection session started: (.+)/);
+      if (match) {
+        sessionStart = match[1].trim();
+      }
+    }
+    
+    // Extract all order sections (between separator lines)
+    const sections: Array<{ total: number; timestamp: string; orders: Array<{ code: string; time: string; status: string }> }> = [];
+    let currentSection: { total: number; timestamp: string; orders: Array<{ code: string; time: string; status: string }> } | null = null;
+    
+    for (const line of lines) {
+      // Check for section header: "# Total orders detected: X | Timestamp: ..."
+      const sectionHeaderMatch = line.match(/# Total orders detected: (\d+) \| Timestamp: (.+)/);
+      if (sectionHeaderMatch) {
+        // Save previous section if exists
+        if (currentSection) {
+          sections.push(currentSection);
+        }
+        // Start new section
+        currentSection = {
+          total: parseInt(sectionHeaderMatch[1], 10),
+          timestamp: sectionHeaderMatch[2].trim(),
+          orders: []
+        };
+        continue;
+      }
+      
+      // Check for order line: "timestamp | #CODE | time | status"
+      const orderMatch = line.match(/^\d{4}-\d{2}-\d{2}T[\d:.-]+ \| (#[A-Z0-9-]+) \| (.+?) \| (.+)$/);
+      if (orderMatch && currentSection) {
+        currentSection.orders.push({
+          code: orderMatch[1],
+          time: orderMatch[2].trim(),
+          status: orderMatch[3].trim()
+        });
+      }
+    }
+    
+    // Add last section if exists
+    if (currentSection) {
+      sections.push(currentSection);
+    }
+    
+    // If no sections found, try to parse orders directly
+    if (sections.length === 0) {
+      const directOrders: Array<{ code: string; time: string; status: string }> = [];
+      for (const line of lines) {
+        const orderMatch = line.match(/^\d{4}-\d{2}-\d{2}T[\d:.-]+ \| (#[A-Z0-9-]+) \| (.+?) \| (.+)$/);
+        if (orderMatch) {
+          directOrders.push({
+            code: orderMatch[1],
+            time: orderMatch[2].trim(),
+            status: orderMatch[3].trim()
+          });
+        }
+      }
+      
+      if (directOrders.length > 0) {
+        sections.push({
+          total: directOrders.length,
+          timestamp: sessionStart || new Date().toISOString(),
+          orders: directOrders
+        });
+      }
+    }
+    
+    if (sections.length === 0) {
+      return ['No valid order data found in log file'];
+    }
+    
+    // Use the most recent section (last one) for the summary
+    const latestSection = sections[sections.length - 1];
+    const allOrders = latestSection.orders;
+    
+    // Build header message
+    const headerMessage = `📋 *Detected Orders Summary*\n\n` +
+      `Total orders: *${latestSection.total}*\n` +
+      `Detection time: ${latestSection.timestamp}\n` +
+      `\n_Order Code | Delivery Time | Status_\n`;
+    
+    // Group orders into chunks to fit within Telegram's message limit
+    let currentMessage = headerMessage;
+    
+    for (const order of allOrders) {
+      const orderLine = `${order.code} | ${order.time} | ${order.status}\n`;
+      
+      // Check if adding this order would exceed the limit
+      const testMessage = currentMessage + orderLine;
+      if (testMessage.length > TELEGRAM_MAX_LENGTH - 100) { // Leave some buffer
+        // Save current message and start a new one
+        messages.push(currentMessage.trim());
+        currentMessage = `📋 *Detected Orders (continued)*\n\n` +
+          `_Order Code | Delivery Time | Status_\n` +
+          orderLine;
+      } else {
+        currentMessage += orderLine;
+      }
+    }
+    
+    // Add the last message if it has content
+    if (currentMessage.trim() !== headerMessage.trim()) {
+      messages.push(currentMessage.trim());
+    } else if (messages.length === 0) {
+      // If no orders were added, just send the header
+      messages.push(headerMessage.trim() + '\n_No orders found_');
+    }
+    
+    // If we have multiple sections, add a note about it
+    if (sections.length > 1) {
+      messages[0] = messages[0] + `\n\n_Note: Log contains ${sections.length} detection cycles. Showing latest._`;
+    }
+    
+    return messages;
+  } catch (error: any) {
+    logMessage(`Error formatting detected orders log: ${error.message}`, 'ERROR');
+    return [`Error formatting log: ${error.message}`];
   }
 }
 
@@ -2134,7 +2459,6 @@ async function main(): Promise<void> {
 
     if (telegramBot) {
       logMessage("Telegram bot initialized successfully");
-      await sendMessageToTelegram("EZCater Web Driver Bot initiated");
     } else {
       logMessage("Telegram bot not initialized, continuing without notifications");
     }
@@ -2253,6 +2577,226 @@ async function main(): Promise<void> {
             'Failed to execute task',
             (error as Error).message
           )
+        );
+      }
+    });
+
+    // Route to test Telegram connectivity
+    apiRouter.post('/notifications/telegram-test', authenticateToken, async (req: Request, res: Response) => {
+      const bodyMessage = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+      const messageToSend = bodyMessage || 'Telegram test from EZCater Web Driver Bot';
+
+      try {
+        await sendMessageToTelegram(messageToSend);
+
+        return res.status(200).json(
+          createApiResponse(
+            true,
+            'Telegram test message sent (or attempted) successfully',
+            null,
+            { message: messageToSend }
+          )
+        );
+      } catch (error: any) {
+        logMessage('Error in /notifications/telegram-test endpoint: ' + error, 'ERROR');
+        return res.status(500).json(
+          createApiResponse(
+            false,
+            'Failed to send Telegram test message',
+            (error as Error).message
+          )
+        );
+      }
+    });
+
+    // Route to send detected orders log to Telegram
+    apiRouter.post('/notifications/send-detected-orders-log', authenticateToken, async (req: Request, res: Response) => {
+      try {
+        const date = typeof req.body?.date === 'string' ? req.body.date.trim() : undefined;
+        
+        logMessage(`Request to send detected orders log${date ? ` for date: ${date}` : ' (latest)'}`);
+
+        // Get the log file path
+        const logPath = getDetectedOrdersLogPath(date);
+        
+        if (!logPath) {
+          const errorMsg = date 
+            ? `No detected orders log file found for date: ${date}`
+            : 'No detected orders log file found';
+          logMessage(errorMsg, 'WARNING');
+          return res.status(404).json(
+            createApiResponse(
+              false,
+              errorMsg,
+              'Log file not found'
+            )
+          );
+        }
+
+        logMessage(`Found log file: ${logPath}`);
+
+        // Read the log file
+        let rawLog: string;
+        try {
+          rawLog = readDetectedOrdersLog(logPath);
+        } catch (readError: any) {
+          logMessage(`Error reading log file: ${readError.message}`, 'ERROR');
+          return res.status(500).json(
+            createApiResponse(
+              false,
+              'Failed to read log file',
+              readError.message
+            )
+          );
+        }
+
+        // Format the log for Telegram
+        const formattedMessages = formatDetectedOrdersForTelegram(rawLog);
+        
+        if (formattedMessages.length === 0) {
+          logMessage('No messages to send after formatting', 'WARNING');
+          return res.status(200).json(
+            createApiResponse(
+              true,
+              'Log file processed but no messages were generated',
+              null,
+              { logPath, messagesSent: 0 }
+            )
+          );
+        }
+
+        logMessage(`Formatted log into ${formattedMessages.length} message(s) for Telegram`);
+
+        // Send each message chunk to Telegram
+        let messagesSent = 0;
+        let sendErrors: string[] = [];
+
+        for (let i = 0; i < formattedMessages.length; i++) {
+          try {
+            await sendMessageToTelegram(formattedMessages[i]);
+            messagesSent++;
+            logMessage(`Sent message ${i + 1}/${formattedMessages.length} to Telegram`);
+            
+            // Add a small delay between messages to avoid rate limiting
+            if (i < formattedMessages.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          } catch (sendError: any) {
+            const errorMsg = `Failed to send message ${i + 1}/${formattedMessages.length}: ${sendError.message}`;
+            logMessage(errorMsg, 'ERROR');
+            sendErrors.push(errorMsg);
+          }
+        }
+
+        if (sendErrors.length > 0 && messagesSent === 0) {
+          // All messages failed
+          return res.status(500).json(
+            createApiResponse(
+              false,
+              'Failed to send all messages to Telegram',
+              sendErrors.join('; '),
+              { logPath, messagesSent, totalMessages: formattedMessages.length }
+            )
+          );
+        }
+
+        // At least some messages were sent successfully
+        const responseMessage = messagesSent === formattedMessages.length
+          ? `Successfully sent ${messagesSent} message(s) to Telegram`
+          : `Sent ${messagesSent} of ${formattedMessages.length} message(s) to Telegram (${sendErrors.length} failed)`;
+
+        logMessage(responseMessage);
+
+        return res.status(200).json(
+          createApiResponse(
+            true,
+            responseMessage,
+            sendErrors.length > 0 ? sendErrors.join('; ') : null,
+            { 
+              logPath, 
+              messagesSent, 
+              totalMessages: formattedMessages.length,
+              errors: sendErrors.length > 0 ? sendErrors : undefined
+            }
+          )
+        );
+      } catch (error: any) {
+        logMessage('Error in /notifications/send-detected-orders-log endpoint: ' + error, 'ERROR');
+        return res.status(500).json(
+          createApiResponse(
+            false,
+            'Failed to send detected orders log',
+            (error as Error).message
+          )
+        );
+      }
+    });
+
+    // Route to send report (reporte YYYY-MM-DD.txt) to Telegram, formatted for readability
+    apiRouter.post('/notifications/send-report', authenticateToken, async (req: Request, res: Response) => {
+      try {
+        const date = typeof req.body?.date === 'string' ? req.body.date.trim() : undefined;
+        logMessage(`Request to send report${date ? ` for date: ${date}` : ' (latest)'}`);
+
+        const logPath = getReportLogPath(date);
+        if (!logPath) {
+          const errorMsg = date
+            ? `No report file found for date: ${date}`
+            : 'No report file found (look for reporte YYYY-MM-DD.txt in logs/)';
+          logMessage(errorMsg, 'WARNING');
+          return res.status(404).json(
+            createApiResponse(false, errorMsg, 'Report file not found')
+          );
+        }
+
+        logMessage(`Found report file: ${logPath}`);
+        let rawReport: string;
+        try {
+          rawReport = readFileSync(logPath, 'utf8');
+        } catch (readError: any) {
+          logMessage(`Error reading report file: ${readError.message}`, 'ERROR');
+          return res.status(500).json(
+            createApiResponse(false, 'Failed to read report file', readError.message)
+          );
+        }
+
+        const formattedMessages = formatReportForTelegram(rawReport);
+        if (formattedMessages.length === 0) {
+          return res.status(200).json(
+            createApiResponse(true, 'Report processed but no messages generated', null, { logPath, messagesSent: 0 })
+          );
+        }
+
+        let messagesSent = 0;
+        const sendErrors: string[] = [];
+        for (let i = 0; i < formattedMessages.length; i++) {
+          try {
+            await sendMessageToTelegram(formattedMessages[i]);
+            messagesSent++;
+            if (i < formattedMessages.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          } catch (sendError: any) {
+            sendErrors.push(`Message ${i + 1}: ${sendError.message}`);
+          }
+        }
+
+        const responseMessage = messagesSent === formattedMessages.length
+          ? `Successfully sent ${messagesSent} report message(s) to Telegram`
+          : `Sent ${messagesSent} of ${formattedMessages.length} message(s) (${sendErrors.length} failed)`;
+
+        return res.status(200).json(
+          createApiResponse(
+            true,
+            responseMessage,
+            sendErrors.length > 0 ? sendErrors.join('; ') : null,
+            { logPath, messagesSent, totalMessages: formattedMessages.length }
+          )
+        );
+      } catch (error: any) {
+        logMessage('Error in /notifications/send-report endpoint: ' + error, 'ERROR');
+        return res.status(500).json(
+          createApiResponse(false, 'Failed to send report', (error as Error).message)
         );
       }
     });

@@ -55,12 +55,40 @@ task:
 
 ### 3. Configurar Telegram (Opcional)
 
-Crea el archivo `config/.env.secrets`:
+La integración con Telegram se configura mediante un archivo de secretos **no versionado** en `config/.env.secrets`.
+
+- **Ubicación del archivo**: `config/.env.secrets` (asegúrate de crearlo en el servidor donde corre el bot).
+- **Variables soportadas**:
+  - `TELEGRAM_API_TOKEN`: token del bot de Telegram.
+  - `TELEGRAM_CHAT_IDS`: lista de chat IDs separados por comas (puede ser 1 o varios chats/grupos).
+
+Formato exacto del archivo (sin comillas, sin espacios alrededor del `=`):
 
 ```
-TELEGRAM_API_TOKEN=tu_token_aqui
-TELEGRAM_CHAT_IDS=chat_id_1,chat_id_2
+TELEGRAM_API_TOKEN=1234567890:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+TELEGRAM_CHAT_IDS=123456789,-100222333444
 ```
+
+Detalles importantes:
+
+- El archivo se lee desde `src/main.ts` en `config/.env.secrets`, por lo que **debe existir** en cada entorno donde quieras notificaciones.
+- Si `TELEGRAM_API_TOKEN` no está definido en el archivo, el bot registrará en los logs que no puede inicializar Telegram y continuará **sin notificaciones**.
+- Si `TELEGRAM_CHAT_IDS` falta o está vacío, el bot se inicializa, pero no enviará mensajes a ningún chat (mostrará un warning en logs).
+- Los IDs pueden ser de chats privados o grupos; si hay varios, sepáralos con comas y el bot enviará el mismo mensaje a todos.
+
+Verificación rápida:
+
+- Arranca el bot (`npm start` o usando PM2).
+- Revisa los logs y comprueba que aparece el mensaje `Telegram bot initialized successfully`.
+- Al iniciarse correctamente, el bot enviará un mensaje de texto `"EZCater Web Driver Bot initiated"` a todos los chats configurados.
+
+Notas para producción (VM):
+
+- La VM de producción debe tener **su propio** archivo `config/.env.secrets` con:
+  - El token del bot que se usará en producción.
+  - El/los chat IDs del grupo compartido donde queréis recibir las alertas.
+- Este archivo **no debe** copiarse al repositorio ni a ningún control de versiones; edítalo directamente en la VM (por ejemplo con `nano config/.env.secrets`).
+- En local puedes usar otro bot/token y un chat ID personal para pruebas; sólo necesitas mantener la misma estructura de variables.
 
 ### 4. Compilar el proyecto
 
