@@ -391,13 +391,20 @@ async function initBrowser(url: string, context: string): Promise<InitBrowserRes
 
     const config = loadConfig();
 
-    const browser = await launch({
+    // Launch browser with timeout
+    logMessage('Launching browser...');
+    const browser = await Promise.race([
+      launch({
       executablePath: config.browser.executablePath,
       headless: false,
       devtools: false,
       userDataDir: profile.profile,
       args: config.browser.args,
-    });
+      }),
+      new Promise<puppeteer.Browser>((_, reject) => 
+        setTimeout(() => reject(new Error('Browser launch timeout after 30 seconds')), 30000)
+      )
+    ]);
 
     profile.browser = browser;
 
@@ -413,7 +420,14 @@ async function initBrowser(url: string, context: string): Promise<InitBrowserRes
       deviceScaleFactor: 1
     });
 
-    await page.goto(url);
+    // Navigate to URL with timeout
+    logMessage(`Navigating to ${url}...`);
+    await Promise.race([
+      page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Page navigation timeout after 30 seconds')), 30000)
+      )
+    ]);
 
     const title = await page.title();
     logMessage('Page title: ' + title);
@@ -426,6 +440,7 @@ async function initBrowser(url: string, context: string): Promise<InitBrowserRes
 
   } catch (error: any) {
     result.error = (error as Error).message;
+    logMessage(`Error in initBrowser: ${result.error}`, 'ERROR');
   }
 
   return result;
@@ -786,7 +801,7 @@ async function getOrderCount(orderTickets: string[]): Promise<number | null> {
       try {
         const errorText = await response.text();
         errorBody = errorText;
-        logMessage(`Failed to get order count: ${response.status} ${response.statusText}`, 'ERROR');
+      logMessage(`Failed to get order count: ${response.status} ${response.statusText}`, 'ERROR');
         logMessage(`Error response body: ${errorBody}`, 'ERROR');
       } catch (e) {
         logMessage(`Failed to get order count: ${response.status} ${response.statusText}`, 'ERROR');
@@ -857,7 +872,7 @@ async function getOrdersFromAPI(orderTickets: string[], offset: number = 0, limi
       try {
         const errorText = await response.text();
         errorBody = errorText;
-        logMessage(`Failed to get orders: ${response.status} ${response.statusText}`, 'ERROR');
+      logMessage(`Failed to get orders: ${response.status} ${response.statusText}`, 'ERROR');
         logMessage(`Error response body: ${errorBody}`, 'ERROR');
       } catch (e) {
         logMessage(`Failed to get orders: ${response.status} ${response.statusText}`, 'ERROR');
@@ -1430,10 +1445,10 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
           
           if (itemValue) {
             status = await getDeliveryStatus(page, itemValue as HTMLElement, orderNumber);
-            if (status) {
+        if (status) {
               logMessage(`  ✓ Found status "${status}" for order ${orderNumber}`);
-            } else {
-              logMessage(`  ⚠ Status not found for order ${orderNumber}`, 'WARNING');
+        } else {
+          logMessage(`  ⚠ Status not found for order ${orderNumber}`, 'WARNING');
             }
           } else {
             logMessage(`  ⚠ Could not find delivery container for order ${orderNumber}`, 'WARNING');
@@ -1479,55 +1494,55 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
         let actionType: 'param1' | 'param2' | 'rule3' | null = null;
         
         // Calculate parameter 1 based on DeliveryAt time
-        // Parameter 1: (deliveryTime - 3 minutes) to (deliveryTime + 3 minutes)
-        // Then check if current time is within this range
-        const param1Start = new Date(deliveryTimeMs - 3 * 60 * 1000);
-        const param1End = new Date(deliveryTimeMs + 3 * 60 * 1000);
-        const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
-        
+          // Parameter 1: (deliveryTime - 3 minutes) to (deliveryTime + 3 minutes)
+          // Then check if current time is within this range
+          const param1Start = new Date(deliveryTimeMs - 3 * 60 * 1000);
+          const param1End = new Date(deliveryTimeMs + 3 * 60 * 1000);
+          const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
+          
         // Calculate parameter 2 based on PickupAt time
         // Parameter 2: (pickupTime - 3 minutes) to (pickupTime + 3 minutes)
-        // Then check if current time is within this range
+          // Then check if current time is within this range
         const param2Start = new Date(pickupTimeMs - 3 * 60 * 1000);
         const param2End = new Date(pickupTimeMs + 3 * 60 * 1000);
-        const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
-        
-        const currentTimeGreater = currentTimeMs > deliveryTimeMs;
-        
+          const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
+          
+          const currentTimeGreater = currentTimeMs > deliveryTimeMs;
+          
         logMessage(`  InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
-        logMessage(`  Current time (EST): ${currentTime.toLocaleTimeString()} (${currentTimeMs})`);
-        logMessage(`  Delivery time: ${deliveryTime.toLocaleTimeString()} (${deliveryTimeMs})`);
+          logMessage(`  Current time (EST): ${currentTime.toLocaleTimeString()} (${currentTimeMs})`);
+          logMessage(`  Delivery time: ${deliveryTime.toLocaleTimeString()} (${deliveryTimeMs})`);
         logMessage(`  Pickup time: ${pickupTime.toLocaleTimeString()} (${pickupTimeMs})`);
         logMessage(`  Status: ${status}, InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
         logMessage(`  Param1 range (based on DeliveryAt): ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()}`);
         logMessage(`  Param2 range (based on PickupAt): ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()}`);
-        
-        // Rule 1: Orders in param1 range AND status is "En Route to Customer"
-        if (inParam1 && status === 'En Route to Customer') {
-          shouldClick = true;
-          actionType = 'param1';
-          reason = 'Param1 range AND En Route to Customer (verified element)';
-          logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range with "En Route to Customer" status`);
-        }
-        
-        // Rule 2: Orders in param2 range AND status is "Delivery Scheduled"
-        if (inParam2 && status === 'Delivery Scheduled') {
-          shouldClick = true;
-          actionType = 'param2';
-          reason = 'Param2 range AND Delivery Scheduled (verified element)';
-          logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with "Delivery Scheduled" status`);
-        }
-        
-        // Rule 3: If order is in specified status AND delivery time < current time, mark for click
-        // This applies to both "En Route to Customer" and "Delivery Scheduled"
-        if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
-          // Only set rule3 if not already set by param1 or param2
-          if (!shouldClick) {
+          
+          // Rule 1: Orders in param1 range AND status is "En Route to Customer"
+          if (inParam1 && status === 'En Route to Customer') {
             shouldClick = true;
-            actionType = 'rule3';
-            reason = `Delivery time < current time AND status is ${status}`;
-            logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed current time with status "${status}"`);
+            actionType = 'param1';
+          reason = 'Param1 range AND En Route to Customer (verified element)';
+            logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range with "En Route to Customer" status`);
           }
+          
+          // Rule 2: Orders in param2 range AND status is "Delivery Scheduled"
+          if (inParam2 && status === 'Delivery Scheduled') {
+            shouldClick = true;
+            actionType = 'param2';
+          reason = 'Param2 range AND Delivery Scheduled (verified element)';
+            logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with "Delivery Scheduled" status`);
+          }
+          
+          // Rule 3: If order is in specified status AND delivery time < current time, mark for click
+          // This applies to both "En Route to Customer" and "Delivery Scheduled"
+          if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
+            // Only set rule3 if not already set by param1 or param2
+            if (!shouldClick) {
+              shouldClick = true;
+              actionType = 'rule3';
+              reason = `Delivery time < current time AND status is ${status}`;
+              logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed current time with status "${status}"`);
+            }
         }
         
         results.push({
@@ -1960,22 +1975,38 @@ async function performOrderActions(page: puppeteer.Page, orderNumber: string, fu
     // Wait for order ticket to appear
     await waitForOrderTicket(page, orderNumber);
     
-    // Step 1: Click "I'm on my way" button (always required)
+    // IMPORTANT: Step 1 - ALWAYS try to click "I'm on my way" button FIRST (before any other buttons)
+    // This must be done before "Delivery is done" and "Confirm" buttons
+    if (!fullProcess) {
+      // param2: Only click "I'm on my way" - this is the main action
     const onMyWayClicked = await clickButtonByText(page, "I'm on my way");
     if (!onMyWayClicked) {
       logMessage(`  Could not click "I'm on my way" button, continuing anyway...`, 'WARNING');
     }
-    
-    // If only param2 (not full process), stop here - DO NOT continue with "Delivery is done" or "Confirm"
-    if (!fullProcess) {
       logMessage(`  ✓ Completed actions for order ${orderNumber} (param2 - ONLY clicked "I'm on my way", skipping "Delivery is done" and "Confirm")`);
       return true;
+    } else {
+      // fullProcess: "I'm on my way" must be clicked FIRST, before "Delivery is done" and "Confirm"
+      // Log warning but don't treat as error if it fails - this is expected in full process as it's a fallback
+      try {
+        const onMyWayClicked = await clickButtonByText(page, "I'm on my way");
+        if (!onMyWayClicked) {
+          // Log as warning but don't treat as error - this is expected in full process as it's a fallback
+          logMessage(`  "I'm on my way" button not found (expected in full process, continuing)`, 'WARNING');
+        } else {
+          logMessage(`  ✓ Clicked "I'm on my way" button (first step)`);
+        }
+      } catch (error: any) {
+        // Log as warning but don't treat as error - this is a fallback action in full process
+        logMessage(`  "I'm on my way" button error (expected in full process, continuing): ${error.message}`, 'WARNING');
+      }
     }
     
-    // Wait for page to update after first button click
+    // Wait for page to update after "I'm on my way" button click (if it happened)
     await waitRandomTime(500, 1000);
     
-    // Step 2: Try to click "Delivery is done" button (if it exists) - only for full process
+    // IMPORTANT: Step 2 - Try to click "Delivery is done" button (if it exists) - only for full process
+    // This comes AFTER "I'm on my way" button
     const deliveryDoneClicked = await clickButtonByText(page, "Delivery is done", 5000);
     if (deliveryDoneClicked) {
       logMessage(`  ✓ Clicked "Delivery is done" button`);
@@ -1985,7 +2016,8 @@ async function performOrderActions(page: puppeteer.Page, orderNumber: string, fu
       logMessage(`  "Delivery is done" button not found (may not be available for this order)`, 'INFO');
     }
     
-    // Step 3: Try to click "Confirm" button (if it exists) - only for full process
+    // IMPORTANT: Step 3 - Try to click "Confirm" button (if it exists) - only for full process
+    // This comes AFTER "I'm on my way" and "Delivery is done" buttons
     const confirmClicked = await clickButtonByText(page, "Confirm", 5000);
     if (confirmClicked) {
       logMessage(`  ✓ Clicked "Confirm" button`);
@@ -2456,28 +2488,92 @@ async function testContinuous(): Promise<void> {
   logMessage('Starting continuous delivery monitoring with button actions (V3 - API-based)...');
   logMessage(`Check interval: 60 seconds (1 minute)`);
   
-  // Initialize browser
-  const browserResult = await initBrowser(config.task.url, 'continuous-test-v3');
+  // Initialize browser with timeout
+  logMessage('Initializing browser (timeout: 60 seconds)...');
+  let browserResult: InitBrowserResult;
+  try {
+    browserResult = await Promise.race([
+      initBrowser(config.task.url, 'continuous-test-v3'),
+      new Promise<InitBrowserResult>((_, reject) => 
+        setTimeout(() => reject(new Error('Browser initialization timeout after 60 seconds')), 60000)
+      )
+    ]);
+  } catch (error: any) {
+    logMessage(`CRITICAL ERROR: Browser initialization failed or timed out: ${error.message}`, 'ERROR');
+    logMessage('Terminating process to allow restart...', 'ERROR');
+    process.exit(1);
+  }
   
   if (browserResult.error || !browserResult.browser || !browserResult.page || !browserResult.profile) {
-    logMessage(`Failed to initialize browser: ${browserResult.error}`, 'ERROR');
-    return;
+    logMessage(`CRITICAL ERROR: Failed to initialize browser: ${browserResult.error}`, 'ERROR');
+    logMessage('Terminating process to allow restart...', 'ERROR');
+    process.exit(1);
   }
   
   const browser = browserResult.browser;
   const page = browserResult.page;
   const profile = browserResult.profile;
   
+  // Track consecutive critical errors
+  let consecutiveCriticalErrors = 0;
+  const MAX_CONSECUTIVE_CRITICAL_ERRORS = 3;
+  
+  // Listen for browser disconnection
+  browser.on('disconnected', () => {
+    logMessage('CRITICAL ERROR: Browser disconnected unexpectedly', 'ERROR');
+    logMessage('Terminating process to allow restart...', 'ERROR');
+    process.exit(1);
+  });
+  
   try {
     // Main loop - check every minute
     while (true) {
+      // Wrap entire cycle in a timeout to prevent hanging
+      const cycleStartTime = Date.now();
+      const MAX_CYCLE_TIME_MS = 5 * 60 * 1000; // 5 minutes max per cycle
+      let cycleCompleted = false;
+      
+      try {
+        await Promise.race([
+          (async () => {
       logMessage('\n=== Starting new check cycle ===');
+            
+            // Check if browser is still connected
+            if (!browser.isConnected()) {
+              logMessage('CRITICAL ERROR: Browser is not connected', 'ERROR');
+              logMessage('Terminating process to allow restart...', 'ERROR');
+              process.exit(1);
+            }
       
       // IMPORTANT: Reload page at the start of each cycle to ensure fresh data
+            // Add timeout to page reload
       logMessage('Reloading page to get latest data...');
-      await page.reload({ waitUntil: 'networkidle2' });
+            try {
+              await Promise.race([
+                page.reload({ waitUntil: 'networkidle2' }),
+                new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('Page reload timeout after 30 seconds')), 30000)
+                )
+              ]);
       await waitRandomTime(2000, 3000);
       logMessage('Page reloaded, starting checks...');
+              // Reset error counter on successful reload
+              consecutiveCriticalErrors = 0;
+            } catch (reloadError: any) {
+              consecutiveCriticalErrors++;
+              logMessage(`CRITICAL ERROR: Page reload failed or timed out: ${reloadError.message}`, 'ERROR');
+              logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
+                logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
+                process.exit(1);
+              }
+              
+              // Wait before retrying
+              logMessage('Waiting 10 seconds before retrying...');
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              throw new Error('Page reload failed, retrying cycle');
+            }
       
       // Check for "No Deliveries available" and reload up to 3 times if needed
       const hasNoDeliveries = await checkNoDeliveries(page);
@@ -2488,7 +2584,8 @@ async function testContinuous(): Promise<void> {
           logMessage('No deliveries available after 3 reload attempts, skipping this cycle');
           logMessage('Waiting 60 seconds before next check...');
           await new Promise(resolve => setTimeout(resolve, 60000));
-          continue;
+                cycleCompleted = true;
+                return;
         }
         // Deliveries are now available, continue with processing
       }
@@ -2501,16 +2598,52 @@ async function testContinuous(): Promise<void> {
           await requestNewLink(page, config.task.phoneNumber);
           await waitRandomTime(1000, 2000);
         }
-        continue;
-      }
-      
-      // Ensure we're on the deliveries page before processing orders
-      const onDeliveriesPage = await ensureOnDeliveriesPage(page);
+              cycleCompleted = true;
+              return;
+            }
+            
+            // Ensure we're on the deliveries page before processing orders (with timeout)
+            logMessage('Ensuring we are on deliveries page...');
+            let onDeliveriesPage: boolean;
+            try {
+              onDeliveriesPage = await Promise.race([
+                ensureOnDeliveriesPage(page),
+                new Promise<boolean>((_, reject) => 
+                  setTimeout(() => reject(new Error('Navigation to deliveries page timeout after 30 seconds')), 30000)
+                )
+              ]);
+            } catch (navError: any) {
+              consecutiveCriticalErrors++;
+              logMessage(`CRITICAL ERROR: Failed to navigate to deliveries page or timed out: ${navError.message}`, 'ERROR');
+              logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
+                logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
+                process.exit(1);
+              }
+              
+              logMessage('Waiting 10 seconds before retrying...');
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              throw new Error('Navigation failed, retrying cycle');
+            }
+            
       if (!onDeliveriesPage) {
-        logMessage('Could not navigate to deliveries page, skipping this cycle', 'WARNING');
-        await new Promise(resolve => setTimeout(resolve, 60000));
-        continue;
-      }
+              consecutiveCriticalErrors++;
+              logMessage('CRITICAL ERROR: Could not navigate to deliveries page', 'ERROR');
+              logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
+                logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
+                process.exit(1);
+              }
+              
+              logMessage('Waiting 10 seconds before retrying...');
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              throw new Error('Navigation failed, retrying cycle');
+            }
+            
+            // Reset error counter on successful navigation
+            consecutiveCriticalErrors = 0;
       
       // IMPORTANT: Check for "No Deliveries available" AFTER ensuring we're on deliveries page
       // This must be done BEFORE processing the list
@@ -2523,23 +2656,52 @@ async function testContinuous(): Promise<void> {
           logMessage('No deliveries available after 3 reload attempts, skipping list processing...');
           logMessage('Waiting 60 seconds before next check...');
           await new Promise(resolve => setTimeout(resolve, 60000));
-          continue;
+                cycleCompleted = true;
+                return;
         }
         // Deliveries are now available, continue with processing
       }
       
-      // Process deliveries - V3: Uses API instead of DOM extraction
-      const { results: deliveries, currentTimeEST } = await processContinuousDeliveries(page);
+            // Process deliveries - V3: Uses API instead of DOM extraction (with timeout)
+            logMessage('Processing deliveries...');
+            let deliveries: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>;
+            let currentTimeEST: Date;
+            
+            try {
+              const processResult = await Promise.race([
+                processContinuousDeliveries(page),
+                new Promise<{ results: Array<{ orderNumber: string, timeText: string, status: string | null, shouldClick: boolean, reason: string, actionType: 'param1' | 'param2' | 'rule3' | null }>, currentTimeEST: Date }>((_, reject) => 
+                  setTimeout(() => reject(new Error('Process deliveries timeout after 120 seconds')), 120000)
+                )
+              ]);
+              deliveries = processResult.results;
+              currentTimeEST = processResult.currentTimeEST;
+              // Reset error counter on successful processing
+              consecutiveCriticalErrors = 0;
+            } catch (processError: any) {
+              consecutiveCriticalErrors++;
+              logMessage(`CRITICAL ERROR: Failed to process deliveries or timed out: ${processError.message}`, 'ERROR');
+              logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
+                logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
+                process.exit(1);
+              }
+              
+              logMessage('Waiting 10 seconds before retrying...');
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              throw new Error('Process deliveries failed, retrying cycle');
+            }
       
       logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) from API`);
-      
-      // Log detection cycle header with total count and separator (using cycle time EST)
-      logDetectionCycleHeader(deliveries.length, currentTimeEST);
-      
-      // Log all detected orders (using cycle time EST)
-      for (const delivery of deliveries) {
-        logDetectedOrder(delivery.orderNumber, delivery.timeText, delivery.status, currentTimeEST);
-      }
+            
+            // Log detection cycle header with total count and separator (using cycle time EST)
+            logDetectionCycleHeader(deliveries.length, currentTimeEST);
+            
+            // Log all detected orders (using cycle time EST)
+            for (const delivery of deliveries) {
+              logDetectedOrder(delivery.orderNumber, delivery.timeText, delivery.status, currentTimeEST);
+            }
       
       // Separate orders into categories
       const eligibleToClick = deliveries.filter(d => d.shouldClick);
@@ -2640,8 +2802,8 @@ async function testContinuous(): Promise<void> {
       // Log final summary of this cycle
       logMessage(`\n📊 Cycle processing complete:`);
       logMessage(`  - Total orders reviewed: ${deliveries.length}`);
-      logMessage(`  - Clicked successfully: ${clickedCount}`);
-      logMessage(`  - Failed to click: ${failedCount}`);
+            logMessage(`  - Clicked successfully: ${clickedCount}`);
+            logMessage(`  - Failed to click: ${failedCount}`);
       logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
       
       logMessage(`\n=== Check cycle completed ===`);
@@ -2649,13 +2811,60 @@ async function testContinuous(): Promise<void> {
       
       // Wait 60 seconds (1 minute) before next check
       await new Promise(resolve => setTimeout(resolve, 60000));
+            cycleCompleted = true;
+          })(),
+          new Promise((_, reject) => 
+            setTimeout(() => {
+              const elapsed = Date.now() - cycleStartTime;
+              reject(new Error(`Check cycle timeout after ${Math.floor(elapsed / 1000)} seconds (max: ${MAX_CYCLE_TIME_MS / 1000}s)`));
+            }, MAX_CYCLE_TIME_MS)
+          )
+        ]);
+      } catch (cycleTimeoutError: any) {
+        consecutiveCriticalErrors++;
+        logMessage(`CRITICAL ERROR: Check cycle timed out or failed: ${cycleTimeoutError.message}`, 'ERROR');
+        logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+        
+        if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
+          logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
+          process.exit(1);
+        }
+        
+        logMessage('Waiting 10 seconds before retrying...');
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        // Continue to next iteration of while loop
+      }
     }
     
   } catch (error: any) {
-    logMessage(`Error in continuous test: ${error.message}`, 'ERROR');
+    logMessage(`CRITICAL ERROR in continuous test: ${error.message}`, 'ERROR');
+    logMessage('Terminating process to allow restart...', 'ERROR');
+    // Try to clean up browser before exiting
+    try {
+      if (browser && browser.isConnected()) {
+        await browser.close();
+      }
+      if (profile) {
+        browserPool.returnBrowserProfile(profile, false);
+      }
+    } catch (cleanupError) {
+      // Ignore cleanup errors
+    }
+    process.exit(1);
   } finally {
-    // Keep browser open
-    logMessage("\nBrowser remains open. Press Ctrl+C to stop monitoring.");
+    // This should not be reached in normal operation (process exits on critical errors)
+    // But keep it for safety
+    logMessage("\nProcess ending. Browser will be closed.");
+    try {
+      if (browser && browser.isConnected()) {
+        await browser.close();
+      }
+      if (profile) {
+        browserPool.returnBrowserProfile(profile, false);
+      }
+    } catch (cleanupError) {
+      // Ignore cleanup errors
+    }
   }
 }
 

@@ -1,8 +1,9 @@
 #!/bin/bash
-# Script de monitoreo que verifica si el bot debe estar corriendo
-# y lo inicia/detiene según el rango de horas configurado
-# Configurado para: 6:00 AM - 10:00 PM (22:00)
-# Mantiene una consola abierta con los logs mientras el bot está corriendo
+# Script de monitoreo que mantiene el bot siempre activo durante el horario configurado
+# - Asegura una sola instancia del bot corriendo
+# - Asegura una sola terminal abierta para monitoreo
+# - Reinicia el bot periódicamente para liberar memoria
+# - Solo se ejecuta durante el horario configurado (6:00 AM - 10:00 PM)
 
 # =============================================================================
 # CONFIGURACIÓN
@@ -11,6 +12,9 @@
 START_HOUR="06:00"    # 6:00 AM
 END_HOUR="22:00"      # 10:00 PM (22:00)
 
+# Intervalo de reinicio del bot (en horas) para liberar memoria
+RESTART_INTERVAL_HOURS=6  # Reiniciar cada 6 horas
+
 # Nombre del proceso en PM2
 BOT_NAME="ezcater_bot_v3"
 
@@ -18,12 +22,65 @@ BOT_NAME="ezcater_bot_v3"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$SCRIPT_DIR"
 
-# Archivo PID para el keeper de logs
+# Archivos de control
+MONITOR_LOCK_FILE="/tmp/ezcater_bot_v3_monitor.lock"
+MONITOR_PID_FILE="/tmp/ezcater_bot_v3_monitor.pid"
+BOT_START_TIME_FILE="/tmp/ezcater_bot_v3_start_time.txt"
 KEEPER_PID_FILE="/tmp/ezcater_bot_v3_log_keeper.pid"
 LOG_TERMINAL_PID_FILE="/tmp/ezcater_bot_v3_log_terminal.pid"
 
 # Ruta al script que mantiene los logs abiertos
 KEEPER_SCRIPT="$SCRIPT_DIR/keep_logs_open.sh"
+
+# Intervalo de verificación del monitor (en segundos)
+MONITOR_CHECK_INTERVAL=60  # Verificar cada minuto
+
+# =============================================================================
+# FUNCIONES DE CONTROL DE INSTANCIAS
+# =============================================================================
+
+# Verificar si ya hay otra instancia del monitor corriendo
+check_monitor_instance() {
+    # Verificar lock file
+    if [ -f "$MONITOR_LOCK_FILE" ]; then
+        local lock_pid=$(cat "$MONITOR_LOCK_FILE" 2>/dev/null)
+        if [ -n "$lock_pid" ] && ps -p "$lock_pid" > /dev/null 2>&1; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Otra instancia del monitor ya está corriendo (PID: $lock_pid)"
+            exit 1
+        else
+            # Lock file huérfano, eliminarlo
+            rm -f "$MONITOR_LOCK_FILE"
+        fi
+    fi
+    
+    # Verificar por nombre de proceso
+    local existing_pids=$(pgrep -f "monitor_bot_v3.sh" | grep -v $$)
+    if [ -n "$existing_pids" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Encontradas otras instancias del monitor. Deteniéndolas..."
+        echo "$existing_pids" | xargs kill 2>/dev/null || true
+        sleep 2
+        # Forzar si aún existen
+        local still_running=$(pgrep -f "monitor_bot_v3.sh" | grep -v $$)
+        if [ -n "$still_running" ]; then
+            echo "$still_running" | xargs kill -9 2>/dev/null || true
+        fi
+        sleep 1
+    fi
+    
+    # Crear lock file
+    echo $$ > "$MONITOR_LOCK_FILE"
+    echo $$ > "$MONITOR_PID_FILE"
+}
+
+# Limpiar archivos de control al salir
+cleanup_monitor() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Deteniendo monitor..."
+    rm -f "$MONITOR_LOCK_FILE"
+    rm -f "$MONITOR_PID_FILE"
+    exit 0
+}
+
+trap cleanup_monitor SIGTERM SIGINT EXIT
 
 # =============================================================================
 # FUNCIONES PARA TERMINAL DE LOGS
@@ -162,6 +219,18 @@ is_bot_running() {
     pm2 list | grep -q "$BOT_NAME" && pm2 list | grep "$BOT_NAME" | grep -q "online"
 }
 
+# Verificar si hay múltiples instancias del bot en PM2
+check_multiple_bot_instances() {
+    local count=$(pm2 list | grep "$BOT_NAME" | wc -l)
+    if [ "$count" -gt 1 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ ADVERTENCIA: Se detectaron $count instancias del bot en PM2. Limpiando..."
+        pm2 delete "$BOT_NAME" 2>/dev/null || true
+        sleep 2
+        return 1
+    fi
+    return 0
+}
+
 # Obtener hora actual en formato HH:MM
 get_current_time() {
     date +"%H:%M"
@@ -192,6 +261,58 @@ is_within_time_range() {
     fi
 }
 
+# Guardar el tiempo de inicio del bot
+save_bot_start_time() {
+    date +%s > "$BOT_START_TIME_FILE"
+}
+
+# Obtener el tiempo de inicio del bot (en segundos desde epoch)
+get_bot_start_time() {
+    if [ -f "$BOT_START_TIME_FILE" ]; then
+        cat "$BOT_START_TIME_FILE" 2>/dev/null
+    else
+        echo "0"
+    fi
+}
+
+# Verificar si el bot necesita reinicio (por tiempo de ejecución)
+should_restart_bot() {
+    local start_time=$(get_bot_start_time)
+    if [ "$start_time" = "0" ]; then
+        return 1  # No hay tiempo guardado, no reiniciar
+    fi
+    
+    local current_time=$(date +%s)
+    local elapsed_seconds=$((current_time - start_time))
+    local restart_interval_seconds=$((RESTART_INTERVAL_HOURS * 3600))
+    
+    if [ $elapsed_seconds -ge $restart_interval_seconds ]; then
+        return 0  # Necesita reinicio
+    else
+        return 1  # No necesita reinicio
+    fi
+}
+
+# Reiniciar el bot (detener y volver a iniciar)
+restart_bot() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reiniciando bot (ha estado corriendo por $RESTART_INTERVAL_HOURS horas)..."
+    
+    # Detener el bot
+    if is_bot_running; then
+        pm2 stop "$BOT_NAME" 2>/dev/null || true
+        sleep 2
+        pm2 delete "$BOT_NAME" 2>/dev/null || true
+        sleep 1
+    fi
+    
+    # Cerrar procesos de Chrome relacionados
+    pkill -f "chrome.*ezcater" 2>/dev/null || true
+    sleep 1
+    
+    # Iniciar el bot de nuevo
+    start_bot
+}
+
 # Iniciar el bot
 start_bot() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando bot $BOT_NAME..."
@@ -200,6 +321,25 @@ start_bot() {
         echo "ERROR: No se pudo cambiar al directorio del proyecto: $PROJECT_DIR"
         exit 1
     }
+    
+    # Asegurar que el directorio logs existe y tiene permisos correctos
+    if [ -f "$PROJECT_DIR/ensure_logs_directory.sh" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Verificando directorio de logs..."
+        bash "$PROJECT_DIR/ensure_logs_directory.sh" || {
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Advertencia: Problemas con el directorio de logs, pero continuando..."
+        }
+    else
+        # Fallback: crear directorio manualmente si el script no existe
+        if [ ! -d "$PROJECT_DIR/logs" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Creando directorio logs..."
+            mkdir -p "$PROJECT_DIR/logs" && chmod 755 "$PROJECT_DIR/logs" || {
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Advertencia: No se pudo crear el directorio logs"
+            }
+        fi
+    fi
+    
+    # Verificar que no hay múltiples instancias
+    check_multiple_bot_instances
     
     # Configurar DISPLAY si es necesario
     export DISPLAY=:1
@@ -229,6 +369,9 @@ start_bot() {
     if is_bot_running; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Bot iniciado correctamente"
         
+        # Guardar tiempo de inicio
+        save_bot_start_time
+        
         # Iniciar keeper de logs (mantiene terminal siempre abierta)
         sleep 2  # Esperar un poco más para que PM2 genere logs
         start_log_keeper
@@ -249,6 +392,8 @@ stop_bot() {
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] El bot no está corriendo"
         # Detener keeper de logs de todos modos
         stop_log_keeper
+        # Limpiar archivo de tiempo de inicio
+        rm -f "$BOT_START_TIME_FILE"
         return 0
     fi
     
@@ -262,57 +407,72 @@ stop_bot() {
     # Detener keeper de logs (esto cerrará la terminal automáticamente)
     stop_log_keeper
     
+    # Limpiar archivo de tiempo de inicio
+    rm -f "$BOT_START_TIME_FILE"
+    
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Bot detenido correctamente"
     return 0
 }
 
 # =============================================================================
-# LÓGICA PRINCIPAL
+# LÓGICA PRINCIPAL - LOOP CONTINUO
 # =============================================================================
+
+# Verificar instancia única del monitor
+check_monitor_instance
 
 load_nvm
 check_pm2
 
-current_time=$(get_current_time)
-is_running=$(is_bot_running && echo "true" || echo "false")
-in_range=$(is_within_time_range && echo "true" || echo "false")
-
 echo "=========================================="
-echo "Monitoreo del bot - $(date '+%Y-%m-%d %H:%M:%S')"
-echo "Hora actual: $current_time"
+echo "Monitor del bot iniciado - $(date '+%Y-%m-%d %H:%M:%S')"
 echo "Rango permitido: $START_HOUR - $END_HOUR"
-echo "Bot corriendo: $is_running"
-echo "Dentro del rango: $in_range"
+echo "Intervalo de reinicio: $RESTART_INTERVAL_HOURS horas"
+echo "Intervalo de verificación: $MONITOR_CHECK_INTERVAL segundos"
+echo "PID del monitor: $$"
 echo "=========================================="
 
-# Decisión: ¿debe estar corriendo?
-if [ "$in_range" = "true" ]; then
-    # Debe estar corriendo (entre 6:00 AM y 10:00 PM)
-    if [ "$is_running" = "false" ]; then
-        echo "→ El bot debe estar corriendo pero no lo está. Iniciando..."
-        start_bot
-    else
-        echo "→ El bot está corriendo correctamente."
-        # Asegurar que el keeper de logs esté corriendo (mantiene terminal siempre abierta)
-        if ! is_log_keeper_running; then
-            echo "→ Keeper de logs no está corriendo. Iniciando..."
-            start_log_keeper
+# Loop principal del monitor
+while true; do
+    current_time=$(get_current_time)
+    is_running=$(is_bot_running && echo "true" || echo "false")
+    in_range=$(is_within_time_range && echo "true" || echo "false")
+    
+    # Verificar si hay múltiples instancias del bot
+    check_multiple_bot_instances
+    
+    # Decisión: ¿debe estar corriendo?
+    if [ "$in_range" = "true" ]; then
+        # Debe estar corriendo (entre 6:00 AM y 10:00 PM)
+        if [ "$is_running" = "false" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] → El bot debe estar corriendo pero no lo está. Iniciando..."
+            start_bot
         else
-            echo "→ Keeper de logs está corriendo. Terminal de logs disponible."
+            # Bot está corriendo, verificar si necesita reinicio
+            if should_restart_bot; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] → Bot necesita reinicio periódico. Reiniciando..."
+                restart_bot
+            else
+                # Asegurar que el keeper de logs esté corriendo (mantiene terminal siempre abierta)
+                if ! is_log_keeper_running; then
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] → Keeper de logs no está corriendo. Iniciando..."
+                    start_log_keeper
+                fi
+            fi
         fi
-    fi
-else
-    # No debe estar corriendo (fuera de 6:00 AM - 10:00 PM)
-    if [ "$is_running" = "true" ]; then
-        echo "→ El bot está corriendo fuera del rango permitido. Deteniendo..."
-        stop_bot
     else
-        echo "→ El bot está detenido (fuera del rango). No se requiere acción."
-        # Asegurar que el keeper de logs esté detenido
-        if is_log_keeper_running; then
-            stop_log_keeper
+        # No debe estar corriendo (fuera de 6:00 AM - 10:00 PM)
+        if [ "$is_running" = "true" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] → El bot está corriendo fuera del rango permitido. Deteniendo..."
+            stop_bot
+        else
+            # Asegurar que el keeper de logs esté detenido
+            if is_log_keeper_running; then
+                stop_log_keeper
+            fi
         fi
     fi
-fi
-
-echo "=========================================="
+    
+    # Esperar antes de la siguiente verificación
+    sleep $MONITOR_CHECK_INTERVAL
+done
