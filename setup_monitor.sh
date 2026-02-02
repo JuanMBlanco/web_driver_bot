@@ -22,7 +22,27 @@ chmod +x monitor_bot_v3.sh 2>/dev/null || echo "  ⚠ monitor_bot_v3.sh no encon
 chmod +x keep_logs_open.sh 2>/dev/null || echo "  ⚠ keep_logs_open.sh no encontrado"
 chmod +x open_bot_logs.sh 2>/dev/null || echo "  ⚠ open_bot_logs.sh no encontrado"
 chmod +x start_ezcater_web_driver_bot.sh 2>/dev/null || echo "  ⚠ start_ezcater_web_driver_bot.sh no encontrado"
+chmod +x ensure_logs_directory.sh 2>/dev/null || echo "  ⚠ ensure_logs_directory.sh no encontrado"
 echo "  ✓ Permisos configurados"
+echo ""
+
+# Paso 1.5: Asegurar directorio de logs
+echo "Paso 1.5: Verificando directorio de logs..."
+if [ -f "$PROJECT_DIR/ensure_logs_directory.sh" ]; then
+    bash "$PROJECT_DIR/ensure_logs_directory.sh"
+    if [ $? -eq 0 ]; then
+        echo "  ✓ Directorio de logs verificado"
+    else
+        echo "  ⚠ Problemas con el directorio de logs (ver mensajes arriba)"
+    fi
+else
+    # Crear directorio manualmente si el script no existe
+    if [ ! -d "$PROJECT_DIR/logs" ]; then
+        mkdir -p "$PROJECT_DIR/logs" && chmod 755 "$PROJECT_DIR/logs" && echo "  ✓ Directorio logs creado" || echo "  ⚠ No se pudo crear directorio logs"
+    else
+        echo "  ✓ Directorio logs existe"
+    fi
+fi
 echo ""
 
 # Paso 2: Verificar PM2

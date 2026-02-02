@@ -20,7 +20,7 @@ browser:
   checkBrowserInterval: 80 # Seconds between browser age checks
   browserAge: 30 # Maximum browser age in seconds
   # Browser pool size
-  poolSize: 3
+  poolSize: 1
   # Browser launch arguments
   args:
     - "--restore-last-session"
