@@ -49,8 +49,24 @@ rm -f /tmp/ezcater_log_keeper.log
 echo "   ✓ Archivos temporales limpiados"
 echo ""
 
-# 3. Verificar estado de PM2
-echo "3. Verificando estado de PM2..."
+# 3. Eliminar tarea de cron
+echo "3. Eliminando tarea de cron..."
+if crontab -l 2>/dev/null | grep -q "monitor_bot_v3.sh"; then
+    echo "   → Eliminando entrada de cron para monitor_bot_v3.sh..."
+    # Eliminar todas las líneas que contengan monitor_bot_v3.sh
+    (crontab -l 2>/dev/null | grep -v "monitor_bot_v3.sh") | crontab -
+    if [ $? -eq 0 ]; then
+        echo "   ✓ Tarea de cron eliminada"
+    else
+        echo "   ⚠ Error al eliminar tarea de cron"
+    fi
+else
+    echo "   ✓ No hay tarea de cron configurada"
+fi
+echo ""
+
+# 4. Verificar estado de PM2
+echo "4. Verificando estado de PM2..."
 if pm2 list | grep -q "$BOT_NAME"; then
     echo "   ⚠ Aún hay procesos del bot en PM2, eliminando..."
     pm2 delete "$BOT_NAME" 2>/dev/null || true
@@ -60,8 +76,8 @@ else
 fi
 echo ""
 
-# 4. Verificar procesos restantes
-echo "4. Verificando procesos restantes..."
+# 5. Verificar procesos restantes
+echo "5. Verificando procesos restantes..."
 KEEPER_COUNT=$(pgrep -f "keep_logs_open" 2>/dev/null | wc -l)
 TERMINAL_COUNT=$(pgrep -f "EZCater Bot V3" 2>/dev/null | wc -l)
 
@@ -89,7 +105,7 @@ else
 fi
 echo ""
 
-# 5. Mostrar resumen
+# 6. Mostrar resumen
 echo "=========================================="
 echo "RESET COMPLETADO"
 echo "=========================================="
@@ -98,6 +114,7 @@ echo "Estado actual:"
 echo "  - Bot en PM2: $(pm2 list | grep -q "$BOT_NAME" && echo "❌ Aún existe" || echo "✓ Limpio")"
 echo "  - Keepers: $(pgrep -f "keep_logs_open" > /dev/null && echo "❌ Aún corriendo" || echo "✓ Detenidos")"
 echo "  - Terminales: $(pgrep -f "EZCater Bot V3" > /dev/null && echo "❌ Aún abiertas" || echo "✓ Cerradas")"
+echo "  - Cron: $(crontab -l 2>/dev/null | grep -q "monitor_bot_v3.sh" && echo "❌ Aún configurado" || echo "✓ Eliminado")"
 echo ""
 echo "Próximos pasos:"
 echo "  1. Ejecutar el setup: ./setup_monitor.sh"
