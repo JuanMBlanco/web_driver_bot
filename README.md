@@ -225,6 +225,7 @@ npm run build
 - Los navegadores se cierran automáticamente después de un tiempo configurado
 - Las capturas de error se envían automáticamente a Telegram (si está configurado)
 - El sistema guarda logs y datos en el directorio `data/`
+- En VM Linux, el monitor (`monitor_bot_v3.sh`) envía el log de detected-orders a Telegram una vez al día a las 20:00 hora Miami; el API (main.ts) debe estar en la misma máquina (ver SETUP_VM_LINUX.md).
 
 ## Troubleshooting
 

@@ -318,6 +318,23 @@ END_HOUR="22:00"      # Cambiar por la hora de fin deseada
 
 ---
 
+## Envío diario del log de detected-orders a Telegram
+
+El script `monitor_bot_v3.sh` envía una vez al día el log de detected-orders a Telegram a las **20:00 hora Miami** (America/New_York). No hace falta configurar un cron aparte: el mismo monitor que controla el horario del bot (6:00–22:00) ejecuta este envío.
+
+**Requisitos:**
+
+- El **servidor API** (main.ts, puerto 3000) debe estar corriendo en la misma VM (por ejemplo con `start_ezcater_web_driver_bot.sh` o PM2). El monitor llama a `http://localhost:3000/api/notifications/send-detected-orders-log`.
+
+**Variables de entorno opcionales:**
+
+- `EZCATER_API_TOKEN`: token de la API para autenticar la petición. Si no se define, el script usa el primer token definido en `config/ezcater_web_driver_bot.yaml`.
+- `EZCATER_API_BASE_URL`: URL base del API (por defecto `http://localhost:3000`). Útil si el API está en otro host o puerto.
+
+Para depurar el envío: revisar `/tmp/ezcater_telegram_log_curl.log` y los mensajes del monitor en `/tmp/ezcater_monitor.log`.
+
+---
+
 ## Paso 12: Solución de Problemas
 
 ### El Bot No Se Inicia

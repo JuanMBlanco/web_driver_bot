@@ -35,6 +35,12 @@ KEEPER_SCRIPT="$SCRIPT_DIR/keep_logs_open.sh"
 # Intervalo de verificación del monitor (en segundos)
 MONITOR_CHECK_INTERVAL=60  # Verificar cada minuto
 
+# Daily Telegram detected-orders log (8:00 PM Miami time)
+TELEGRAM_SEND_HOUR="20:00"
+TELEGRAM_TZ="America/New_York"
+TELEGRAM_LAST_SENT_FILE="/tmp/ezcater_telegram_log_last_sent.txt"
+API_BASE_URL="${EZCATER_API_BASE_URL:-http://localhost:3000}"
+
 # =============================================================================
 # FUNCIONES DE CONTROL DE INSTANCIAS
 # =============================================================================
@@ -415,6 +421,63 @@ stop_bot() {
 }
 
 # =============================================================================
+# DAILY TELEGRAM DETECTED-ORDERS LOG
+# =============================================================================
+
+# Obtener token de API: env EZCATER_API_TOKEN o primer token en config YAML
+get_api_token() {
+    if [ -n "${EZCATER_API_TOKEN:-}" ]; then
+        echo "$EZCATER_API_TOKEN"
+        return 0
+    fi
+    local yaml="$PROJECT_DIR/config/ezcater_web_driver_bot.yaml"
+    if [ -f "$yaml" ]; then
+        local token
+        token=$(grep -E "^\s+token:\s+" "$yaml" | head -1 | sed 's/.*token:\s*//' | tr -d ' ')
+        if [ -n "$token" ]; then
+            echo "$token"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Enviar log de detected-orders a Telegram una vez al día a las 20:00 Miami
+send_daily_telegram_log_if_due() {
+    local current_date current_time last_sent api_token
+    current_date=$(TZ=$TELEGRAM_TZ date +"%Y-%m-%d")
+    current_time=$(TZ=$TELEGRAM_TZ date +"%H:%M")
+    if [ "$current_time" != "$TELEGRAM_SEND_HOUR" ]; then
+        return 0
+    fi
+    if [ -f "$TELEGRAM_LAST_SENT_FILE" ]; then
+        last_sent=$(cat "$TELEGRAM_LAST_SENT_FILE" 2>/dev/null | tr -d '\n')
+        if [ "$last_sent" = "$current_date" ]; then
+            return 0
+        fi
+    fi
+    if ! api_token=$(get_api_token); then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Daily Telegram log: no API token (set EZCATER_API_TOKEN or token in config)" >&2
+        return 1
+    fi
+    if curl -s -o /tmp/ezcater_telegram_log_curl.log -w "%{http_code}" -X POST \
+        "$API_BASE_URL/api/notifications/send-detected-orders-log" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Token $api_token" > /tmp/ezcater_telegram_log_http_code.txt 2>/dev/null; then
+        local http_code
+        http_code=$(cat /tmp/ezcater_telegram_log_http_code.txt 2>/dev/null)
+        if [ "$http_code" = "200" ]; then
+            echo "$current_date" > "$TELEGRAM_LAST_SENT_FILE"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Daily Telegram detected-orders log sent (8 PM Miami)"
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Daily Telegram log: API returned HTTP $http_code"
+        fi
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ Daily Telegram log: curl failed (check /tmp/ezcater_telegram_log_curl.log)"
+    fi
+}
+
+# =============================================================================
 # LÓGICA PRINCIPAL - LOOP CONTINUO
 # =============================================================================
 
@@ -472,6 +535,9 @@ while true; do
             fi
         fi
     fi
+    
+    # Enviar log de detected-orders a Telegram una vez al día a las 20:00 Miami
+    send_daily_telegram_log_if_due
     
     # Esperar antes de la siguiente verificación
     sleep $MONITOR_CHECK_INTERVAL
