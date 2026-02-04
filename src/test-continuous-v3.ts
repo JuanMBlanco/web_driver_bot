@@ -1316,25 +1316,25 @@ async function getFullDeliveryStatusText(page: puppeteer.Page, orderNumber: stri
       
       if (!todayContainer) return null;
       
-            // Only search for order containers within "Today" section
-            // The container is div.ez-1h5x3dy
-            const allDeliveryContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
+      // Only search for order containers within "Today" section
+      // The container is div.ez-1h5x3dy
+      const allDeliveryContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
             console.log(`getFullDeliveryStatusText: Found ${allDeliveryContainers.length} containers, looking for: ${orderNum}`);
-            for (const container of allDeliveryContainers) {
-              // The order number is in div.ez-7crqac and includes the # (e.g., "#J68-1PM")
-              const orderDiv = container.querySelector('div.ez-7crqac');
-              if (orderDiv) {
-                const orderDivText = orderDiv.textContent?.trim() || '';
+      for (const container of allDeliveryContainers) {
+        // The order number is in div.ez-7crqac and includes the # (e.g., "#J68-1PM")
+        const orderDiv = container.querySelector('div.ez-7crqac');
+        if (orderDiv) {
+          const orderDivText = orderDiv.textContent?.trim() || '';
                 console.log(`getFullDeliveryStatusText: Found orderDiv with text: "${orderDivText}", comparing with: "${orderNum}"`);
-                // Compare with the order number (should match exactly including #)
-                if (orderDivText === orderNum) {
+          // Compare with the order number (should match exactly including #)
+          if (orderDivText === orderNum) {
                   console.log(`getFullDeliveryStatusText: Match found!`);
-                  return container as HTMLElement;
-                }
-              }
-            }
+            return container as HTMLElement;
+          }
+        }
+      }
             console.log(`getFullDeliveryStatusText: No match found for: ${orderNum}`);
-            return null;
+      return null;
     }, orderNumWithHash);
     
     const itemValue = await deliveryItemHandle.jsonValue();
@@ -2437,47 +2437,47 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
     
     try {
       deliveryItemHandle = await page.evaluateHandle((orderNum) => {
-        const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
-        for (const container of allDeliveryContainers) {
-          const orderDiv = container.querySelector('div.ez-7crqac');
-          if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
-            return container as HTMLElement;
-          }
+      const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+      for (const container of allDeliveryContainers) {
+        const orderDiv = container.querySelector('div.ez-7crqac');
+        if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+          return container as HTMLElement;
         }
-        return null;
+      }
+      return null;
       }, orderNumWithHash) as puppeteerTypes.ElementHandle<HTMLElement>;
-      
-      const itemValue = await deliveryItemHandle.jsonValue();
+    
+    const itemValue = await deliveryItemHandle.jsonValue();
       if (itemValue) {
-        // Try clicking with boundingBox first
-        const box = await deliveryItemHandle.boundingBox();
-        if (box) {
-          try {
-            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-            await waitRandomTime(500, 1000);
-            await page.mouse.down();
-            await page.mouse.up();
-            clickSuccess = true;
-            logMessage(`  ✓ Clicked order using mouse (boundingBox method)`);
-          } catch (mouseError: any) {
-            logMessage(`  ⚠ Mouse click failed: ${mouseError.message}, trying DOM click...`, 'WARNING');
-          }
+        // PRIMARY METHOD: Try DOM click first (more reliable)
+        try {
+          await page.evaluate((handle) => {
+            const element = handle as HTMLElement;
+            if (element) {
+              element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              element.click();
+            }
+          }, deliveryItemHandle);
+          clickSuccess = true;
+          logMessage(`  ✓ Clicked order using DOM click method (primary)`);
+        } catch (domError: any) {
+          logMessage(`  ⚠ DOM click failed: ${domError.message}, trying mouse click...`, 'WARNING');
         }
         
-        // If mouse click didn't work, try DOM click
+        // FALLBACK 1: If DOM click didn't work, try mouse click with boundingBox
         if (!clickSuccess) {
-          try {
-            await page.evaluate((handle) => {
-              const element = handle as HTMLElement;
-              if (element) {
-                element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                element.click();
-              }
-            }, deliveryItemHandle);
-            clickSuccess = true;
-            logMessage(`  ✓ Clicked order using DOM click method`);
-          } catch (domError: any) {
-            logMessage(`  ⚠ DOM click failed: ${domError.message}, trying fallback methods...`, 'WARNING');
+          const box = await deliveryItemHandle.boundingBox();
+          if (box) {
+            try {
+              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+              await waitRandomTime(500, 1000);
+              await page.mouse.down();
+              await page.mouse.up();
+              clickSuccess = true;
+              logMessage(`  ✓ Clicked order using mouse (boundingBox method - fallback)`);
+            } catch (mouseError: any) {
+              logMessage(`  ⚠ Mouse click failed: ${mouseError.message}, will try fallback methods...`, 'WARNING');
+            }
           }
         }
       }
@@ -2563,7 +2563,7 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
     
     // Wait for navigation
     try {
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 });
     } catch (navError) {
       logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
     }
@@ -2646,7 +2646,7 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
           
           // Wait for navigation again
           try {
-            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 });
           } catch (navError2) {
             logMessage('Navigation after fallback click may have completed or timed out, continuing...', 'WARNING');
           }
@@ -2729,7 +2729,7 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
       await waitRandomTime(1000, 2000);
       
       try {
-        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 });
       } catch (navError) {
         logMessage('Navigation back may have completed or timed out, continuing...', 'WARNING');
       }
@@ -2833,7 +2833,7 @@ async function ensureOnDeliveriesPage(page: puppeteer.Page): Promise<boolean> {
       await waitRandomTime(1000, 2000);
       
       try {
-        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 });
       } catch (navError) {
         logMessage('Navigation may have completed or timed out, continuing...', 'WARNING');
       }
@@ -3106,17 +3106,56 @@ async function testContinuous(): Promise<void> {
   });
   
   try {
-    // Main loop - check every minute
+    // IMPORTANT: Lock to ensure cycles run sequentially (one at a time)
+    let isCycleRunning = false;
+    let lockStartTime: number | null = null;
+    const MAX_LOCK_TIME_MS = 10 * 60 * 1000; // 10 minutes max lock time (safety mechanism)
+    
+    // Main loop - check every minute - MUST ALWAYS BE ACTIVE
     while (true) {
-      // Wrap entire cycle in a timeout to prevent hanging
-      const cycleStartTime = Date.now();
-      const MAX_CYCLE_TIME_MS = 5 * 60 * 1000; // 5 minutes max per cycle
-      let cycleCompleted = false;
-      
       try {
-        await Promise.race([
+        // CRITICAL: Wait for previous cycle to complete before starting new one
+        // But with a safety timeout to prevent infinite waiting
+        let waitCount = 0;
+        const MAX_WAIT_ITERATIONS = 600; // 10 minutes max wait (600 * 1 second)
+        while (isCycleRunning) {
+          waitCount++;
+          
+          // Safety mechanism: If lock has been held for too long, force release it
+          if (lockStartTime !== null && (Date.now() - lockStartTime) > MAX_LOCK_TIME_MS) {
+            logMessage(`CRITICAL: Lock has been held for ${Math.floor((Date.now() - lockStartTime) / 1000)}s, forcing release to prevent deadlock`, 'ERROR');
+            isCycleRunning = false;
+            lockStartTime = null;
+            break;
+          }
+          
+          // Safety mechanism: If we've been waiting too long, force release
+          if (waitCount >= MAX_WAIT_ITERATIONS) {
+            logMessage(`CRITICAL: Waited ${waitCount} seconds for previous cycle, forcing release to prevent deadlock`, 'ERROR');
+            isCycleRunning = false;
+            lockStartTime = null;
+            break;
+          }
+          
+          if (waitCount % 30 === 0) { // Log every 30 seconds
+            logMessage(`Previous cycle still running, waiting... (${waitCount}s elapsed)`, 'WARNING');
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
+        // Set lock to prevent concurrent cycles
+        isCycleRunning = true;
+        lockStartTime = Date.now();
+        
+        // Wrap entire cycle in a timeout to prevent hanging
+        const cycleStartTime = Date.now();
+        const MAX_CYCLE_TIME_MS = 5 * 60 * 1000; // 5 minutes max per cycle
+        let cycleCompleted = false;
+        
+        try {
+          await Promise.race([
           (async () => {
-      logMessage('\n=== Starting new check cycle ===');
+            logMessage('\n=== Starting new check cycle ===');
             
             // Check if browser is still connected
             if (!browser.isConnected()) {
@@ -3125,9 +3164,9 @@ async function testContinuous(): Promise<void> {
               process.exit(1);
             }
       
-      // IMPORTANT: Reload page at the start of each cycle to ensure fresh data
+            // IMPORTANT: Reload page at the start of each cycle to ensure fresh data
             // Add timeout to page reload
-      logMessage('Reloading page to get latest data...');
+            logMessage('Reloading page to get latest data...');
             try {
               await Promise.race([
                 page.reload({ waitUntil: 'networkidle2' }),
@@ -3135,8 +3174,47 @@ async function testContinuous(): Promise<void> {
                   setTimeout(() => reject(new Error('Page reload timeout after 30 seconds')), 30000)
                 )
               ]);
-      await waitRandomTime(2000, 3000);
-      logMessage('Page reloaded, starting checks...');
+            await waitRandomTime(2000, 3000);
+            logMessage('Page reloaded, starting checks...');
+            // Reset error counter on successful reload
+            consecutiveCriticalErrors = 0;
+            } catch (reloadError: any) {
+              consecutiveCriticalErrors++;
+              logMessage(`CRITICAL ERROR: Page reload failed or timed out: ${reloadError.message}`, 'ERROR');
+              logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
+                logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
+                process.exit(1);
+              }
+              
+              // Wait before retrying
+              logMessage('Waiting 10 seconds before retrying...');
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              throw new Error('Page reload failed, retrying cycle');
+            }
+      
+            logMessage('\n=== Starting new check cycle ===');
+            
+            // Check if browser is still connected
+            if (!browser.isConnected()) {
+              logMessage('CRITICAL ERROR: Browser is not connected', 'ERROR');
+              logMessage('Terminating process to allow restart...', 'ERROR');
+              process.exit(1);
+            }
+      
+            // IMPORTANT: Reload page at the start of each cycle to ensure fresh data
+            // Add timeout to page reload
+            logMessage('Reloading page to get latest data...');
+            try {
+              await Promise.race([
+                page.reload({ waitUntil: 'networkidle2' }),
+                new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('Page reload timeout after 30 seconds')), 30000)
+                )
+              ]);
+              await waitRandomTime(2000, 3000);
+              logMessage('Page reloaded, starting checks...');
               // Reset error counter on successful reload
               consecutiveCriticalErrors = 0;
             } catch (reloadError: any) {
@@ -3155,30 +3233,34 @@ async function testContinuous(): Promise<void> {
               throw new Error('Page reload failed, retrying cycle');
             }
       
-      // Check for "No Deliveries available" and reload up to 3 times if needed
-      const hasNoDeliveries = await checkNoDeliveries(page);
-      if (hasNoDeliveries) {
-        logMessage('"No Deliveries available" detected, attempting to reload page (max 3 attempts)...');
-        const deliveriesAvailable = await handleNoDeliveriesWithReload(page, 3);
-        if (!deliveriesAvailable) {
-          logMessage('No deliveries available after 3 reload attempts, skipping this cycle');
-          logMessage('Waiting 60 seconds before next check...');
-          await new Promise(resolve => setTimeout(resolve, 60000));
+            // Check for "No Deliveries available" and reload up to 3 times if needed
+            const hasNoDeliveries = await checkNoDeliveries(page);
+            if (hasNoDeliveries) {
+              logMessage('"No Deliveries available" detected, attempting to reload page (max 3 attempts)...');
+              const deliveriesAvailable = await handleNoDeliveriesWithReload(page, 3);
+              if (!deliveriesAvailable) {
+                logMessage('No deliveries available after 3 reload attempts, skipping this cycle');
+                logMessage('Waiting 60 seconds before next check...');
+                await new Promise(resolve => setTimeout(resolve, 60000));
                 cycleCompleted = true;
+                isCycleRunning = false; // Release lock
+                lockStartTime = null;
                 return;
-        }
-        // Deliveries are now available, continue with processing
-      }
+              }
+              // Deliveries are now available, continue with processing
+            }
       
-      // Check for expired link
-      const isExpired = await checkExpired(page);
-      if (isExpired) {
-        logMessage('Expired link detected, requesting new link...');
-        if (config.task.phoneNumber) {
-          await requestNewLink(page, config.task.phoneNumber);
-          await waitRandomTime(1000, 2000);
-        }
+            // Check for expired link
+            const isExpired = await checkExpired(page);
+            if (isExpired) {
+              logMessage('Expired link detected, requesting new link...');
+              if (config.task.phoneNumber) {
+                await requestNewLink(page, config.task.phoneNumber);
+                await waitRandomTime(1000, 2000);
+              }
               cycleCompleted = true;
+              isCycleRunning = false; // Release lock
+              lockStartTime = null;
               return;
             }
             
@@ -3207,7 +3289,7 @@ async function testContinuous(): Promise<void> {
               throw new Error('Navigation failed, retrying cycle');
             }
             
-      if (!onDeliveriesPage) {
+            if (!onDeliveriesPage) {
               consecutiveCriticalErrors++;
               logMessage('CRITICAL ERROR: Could not navigate to deliveries page', 'ERROR');
               logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
@@ -3225,22 +3307,24 @@ async function testContinuous(): Promise<void> {
             // Reset error counter on successful navigation
             consecutiveCriticalErrors = 0;
       
-      // IMPORTANT: Check for "No Deliveries available" AFTER ensuring we're on deliveries page
-      // This must be done BEFORE processing the list
-      // Reload up to 3 times if "No Deliveries available" is detected
-      const hasNoDeliveriesAfterNav = await checkNoDeliveries(page);
-      if (hasNoDeliveriesAfterNav) {
-        logMessage('"No Deliveries available" detected after navigation, attempting to reload page (max 3 attempts)...');
-        const deliveriesAvailable = await handleNoDeliveriesWithReload(page, 3);
-        if (!deliveriesAvailable) {
-          logMessage('No deliveries available after 3 reload attempts, skipping list processing...');
-          logMessage('Waiting 60 seconds before next check...');
-          await new Promise(resolve => setTimeout(resolve, 60000));
+            // IMPORTANT: Check for "No Deliveries available" AFTER ensuring we're on deliveries page
+            // This must be done BEFORE processing the list
+            // Reload up to 3 times if "No Deliveries available" is detected
+            const hasNoDeliveriesAfterNav = await checkNoDeliveries(page);
+            if (hasNoDeliveriesAfterNav) {
+              logMessage('"No Deliveries available" detected after navigation, attempting to reload page (max 3 attempts)...');
+              const deliveriesAvailable = await handleNoDeliveriesWithReload(page, 3);
+              if (!deliveriesAvailable) {
+                logMessage('No deliveries available after 3 reload attempts, skipping list processing...');
+                logMessage('Waiting 60 seconds before next check...');
+                await new Promise(resolve => setTimeout(resolve, 60000));
                 cycleCompleted = true;
+                isCycleRunning = false; // Release lock
+                lockStartTime = null;
                 return;
-        }
-        // Deliveries are now available, continue with processing
-      }
+              }
+              // Deliveries are now available, continue with processing
+            }
       
             // Process deliveries - V3: Uses API instead of DOM extraction (with timeout)
             logMessage('Processing deliveries...');
@@ -3273,7 +3357,7 @@ async function testContinuous(): Promise<void> {
               throw new Error('Process deliveries failed, retrying cycle');
             }
       
-      logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) from API`);
+            logMessage(`\n📊 Summary: Found ${deliveries.length} total order(s) from API`);
             
             // Log detection cycle header with total count and separator (using cycle time EST)
             logDetectionCycleHeader(deliveries.length, currentTimeEST);
@@ -3303,115 +3387,117 @@ async function testContinuous(): Promise<void> {
               logDetectedOrder(delivery.orderNumber, delivery.timeText, fullStatusText, currentTimeEST);
             }
       
-      // Separate orders into categories
-      const eligibleToClick = deliveries.filter(d => d.shouldClick);
-      const notEligible = deliveries.filter(d => !d.shouldClick);
+            // Separate orders into categories
+            const eligibleToClick = deliveries.filter(d => d.shouldClick);
+            const notEligible = deliveries.filter(d => !d.shouldClick);
       
-      logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
-      logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
+            logMessage(`  - Eligible to click: ${eligibleToClick.length}`);
+            logMessage(`  - Not eligible (${notEligible.length}): ${notEligible.map(d => `${d.orderNumber} (${d.reason})`).join(', ')}`);
       
-      // IMPORTANT: Process eligible orders, but limit to 1 click per order per cycle
-      // Track which orders have been clicked in this cycle
-      const clickedOrdersThisCycle = new Set<string>();
-      let clickedCount = 0;
-      let failedCount = 0;
+            // IMPORTANT: Process eligible orders, but limit to 1 click per order per cycle
+            // Track which orders have been clicked in this cycle
+            const clickedOrdersThisCycle = new Set<string>();
+            let clickedCount = 0;
+            let failedCount = 0;
       
-      for (let i = 0; i < eligibleToClick.length; i++) {
-        const delivery = eligibleToClick[i];
-        logMessage(`\n>>> Processing order ${i + 1}/${eligibleToClick.length}: ${delivery.orderNumber} <<<`);
+            for (let i = 0; i < eligibleToClick.length; i++) {
+              const delivery = eligibleToClick[i];
+              logMessage(`\n>>> Processing order ${i + 1}/${eligibleToClick.length}: ${delivery.orderNumber} <<<`);
         
-        // Skip if this order was already clicked in this cycle
-        if (clickedOrdersThisCycle.has(delivery.orderNumber)) {
-          logMessage(`  ⏭ Skipping order ${delivery.orderNumber} - already clicked in this cycle`);
-          continue;
-        }
+              // Skip if this order was already clicked in this cycle
+              if (clickedOrdersThisCycle.has(delivery.orderNumber)) {
+                logMessage(`  ⏭ Skipping order ${delivery.orderNumber} - already clicked in this cycle`);
+                continue;
+              }
         
-        try {
-          // Determine if full process is needed based on actionType
-          // param2 = only "I'm on my way", param1 and rule3 = full process
-          const fullProcess = delivery.actionType !== 'param2';
-          const actionTypeDesc = delivery.actionType === 'param2' ? 'param2 (only "I\'m on my way")' : 
-                                 delivery.actionType === 'param1' ? 'param1 (full process)' :
-                                 delivery.actionType === 'rule3' ? 'rule3 (full process)' : 'unknown';
-          logMessage(`  Action type: ${actionTypeDesc}`);
-          
-          const success = await clickDeliveryAndReturn(page, delivery.orderNumber, fullProcess);
-          
-          if (success) {
-            logClickedOrder(delivery.orderNumber, delivery.timeText, delivery.status, delivery.reason);
-            logMessage(`✓ Successfully clicked order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`);
-            clickedOrdersThisCycle.add(delivery.orderNumber);
-            clickedCount++;
-            
-            // Verify we're back on the deliveries list before continuing
-            const currentUrl = page.url();
-            if (!currentUrl.includes('/deliveries')) {
-              logMessage('Not on deliveries page after return, navigating back...', 'WARNING');
-              // Try to navigate to deliveries page
               try {
-                await page.goto(config.task.url, { waitUntil: 'networkidle2' });
-                await waitRandomTime(1000, 2000);
-              } catch (navError) {
-                logMessage('Failed to navigate back to deliveries page, but continuing with next order...', 'WARNING');
-                // Don't break - continue with next order
+                // Determine if full process is needed based on actionType
+                // param2 = only "I'm on my way", param1 and rule3 = full process
+                const fullProcess = delivery.actionType !== 'param2';
+                const actionTypeDesc = delivery.actionType === 'param2' ? 'param2 (only "I\'m on my way")' : 
+                                       delivery.actionType === 'param1' ? 'param1 (full process)' :
+                                       delivery.actionType === 'rule3' ? 'rule3 (full process)' : 'unknown';
+                logMessage(`  Action type: ${actionTypeDesc}`);
+          
+                const success = await clickDeliveryAndReturn(page, delivery.orderNumber, fullProcess);
+          
+                if (success) {
+                  logClickedOrder(delivery.orderNumber, delivery.timeText, delivery.status, delivery.reason);
+                  logMessage(`✓ Successfully clicked order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`);
+                  clickedOrdersThisCycle.add(delivery.orderNumber);
+                  clickedCount++;
+            
+                  // Verify we're back on the deliveries list before continuing
+                  const currentUrl = page.url();
+                  if (!currentUrl.includes('/deliveries')) {
+                    logMessage('Not on deliveries page after return, navigating back...', 'WARNING');
+                    // Try to navigate to deliveries page
+                    try {
+                      await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+                      await waitRandomTime(1000, 2000);
+                    } catch (navError) {
+                      logMessage('Failed to navigate back to deliveries page, but continuing with next order...', 'WARNING');
+                      // Don't break - continue with next order
+                    }
+                  }
+            
+                  // Wait a bit before processing next order to ensure list is loaded
+                  await waitRandomTime(500, 1000);
+                } else {
+                  logMessage(`✗ Failed to click order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`, 'ERROR');
+                  failedCount++;
+            
+                  // Even if click failed, try to ensure we're on deliveries page
+                  const currentUrl = page.url();
+                  if (!currentUrl.includes('/deliveries')) {
+                    logMessage('Not on deliveries page after failed click, navigating back...', 'WARNING');
+                    try {
+                      await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+                      await waitRandomTime(1000, 2000);
+                    } catch (navError) {
+                      logMessage('Failed to navigate back to deliveries page, but continuing with next order...', 'WARNING');
+                      // Don't break - continue with next order
+                    }
+                  }
+            
+                  // Wait before trying next order
+                  await waitRandomTime(500, 1000);
+                }
+              } catch (error: any) {
+                logMessage(`✗ Error processing order ${delivery.orderNumber}: ${error.message}`, 'ERROR');
+                failedCount++;
+          
+                // Try to get back to deliveries page
+                try {
+                  const currentUrl = page.url();
+                  if (!currentUrl.includes('/deliveries')) {
+                    await page.goto(config.task.url, { waitUntil: 'networkidle2' });
+                    await waitRandomTime(1000, 2000);
+                  }
+                } catch (recoveryError) {
+                  logMessage('Could not recover to deliveries page, but continuing...', 'WARNING');
+                }
+          
+                // Continue with next order even if this one failed
+                await waitRandomTime(500, 1000);
               }
             }
-            
-            // Wait a bit before processing next order to ensure list is loaded
-            await waitRandomTime(500, 1000);
-          } else {
-            logMessage(`✗ Failed to click order ${delivery.orderNumber} (${i + 1}/${eligibleToClick.length})`, 'ERROR');
-            failedCount++;
-            
-            // Even if click failed, try to ensure we're on deliveries page
-            const currentUrl = page.url();
-            if (!currentUrl.includes('/deliveries')) {
-              logMessage('Not on deliveries page after failed click, navigating back...', 'WARNING');
-              try {
-                await page.goto(config.task.url, { waitUntil: 'networkidle2' });
-                await waitRandomTime(1000, 2000);
-              } catch (navError) {
-                logMessage('Failed to navigate back to deliveries page, but continuing with next order...', 'WARNING');
-                // Don't break - continue with next order
-              }
-            }
-            
-            // Wait before trying next order
-            await waitRandomTime(500, 1000);
-          }
-        } catch (error: any) {
-          logMessage(`✗ Error processing order ${delivery.orderNumber}: ${error.message}`, 'ERROR');
-          failedCount++;
-          
-          // Try to get back to deliveries page
-          try {
-            const currentUrl = page.url();
-            if (!currentUrl.includes('/deliveries')) {
-              await page.goto(config.task.url, { waitUntil: 'networkidle2' });
-              await waitRandomTime(1000, 2000);
-            }
-          } catch (recoveryError) {
-            logMessage('Could not recover to deliveries page, but continuing...', 'WARNING');
-          }
-          
-          // Continue with next order even if this one failed
-          await waitRandomTime(500, 1000);
-        }
-      }
       
-      // Log final summary of this cycle
-      logMessage(`\n📊 Cycle processing complete:`);
-      logMessage(`  - Total orders reviewed: ${deliveries.length}`);
+            // Log final summary of this cycle
+            logMessage(`\n📊 Cycle processing complete:`);
+            logMessage(`  - Total orders reviewed: ${deliveries.length}`);
             logMessage(`  - Clicked successfully: ${clickedCount}`);
             logMessage(`  - Failed to click: ${failedCount}`);
-      logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
+            logMessage(`  - Not eligible (skipped): ${notEligible.length}`);
       
-      logMessage(`\n=== Check cycle completed ===`);
-      logMessage(`Waiting 60 seconds before next check...`);
+            logMessage(`\n=== Check cycle completed ===`);
+            logMessage(`Waiting 60 seconds before next check...`);
       
-      // Wait 60 seconds (1 minute) before next check
-      await new Promise(resolve => setTimeout(resolve, 60000));
+            // Wait 60 seconds (1 minute) before next check
+            await new Promise(resolve => setTimeout(resolve, 60000));
             cycleCompleted = true;
+            isCycleRunning = false; // Release lock - cycle fully completed
+            lockStartTime = null;
           })(),
           new Promise((_, reject) => 
             setTimeout(() => {
@@ -3420,19 +3506,49 @@ async function testContinuous(): Promise<void> {
             }, MAX_CYCLE_TIME_MS)
           )
         ]);
-      } catch (cycleTimeoutError: any) {
+      } catch (cycleError: any) {
+        // CRITICAL: Catch ALL errors (timeout, unexpected, etc.) to ensure lock is always released
         consecutiveCriticalErrors++;
-        logMessage(`CRITICAL ERROR: Check cycle timed out or failed: ${cycleTimeoutError.message}`, 'ERROR');
+        logMessage(`CRITICAL ERROR: Check cycle failed: ${cycleError.message}`, 'ERROR');
+        if (cycleError.stack) {
+          logMessage(`Stack: ${cycleError.stack}`, 'ERROR');
+        }
         logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+        
+        // ALWAYS release lock, even on error
+        isCycleRunning = false;
+        lockStartTime = null;
         
         if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
           logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
           process.exit(1);
         }
         
-        logMessage('Waiting 10 seconds before retrying...');
+        logMessage('Lock released due to error. Waiting 10 seconds before retrying...');
         await new Promise(resolve => setTimeout(resolve, 10000));
-        // Continue to next iteration of while loop
+        // Continue to next iteration of while loop - cycle MUST restart
+      } finally {
+        // CRITICAL: Always ensure lock is released, even if something goes wrong
+        // This is a safety net to prevent deadlocks
+        if (isCycleRunning) {
+          const lockDuration = lockStartTime ? Date.now() - lockStartTime : 0;
+          if (lockDuration > MAX_CYCLE_TIME_MS) {
+            logMessage(`CRITICAL: Forcing lock release after ${Math.floor(lockDuration / 1000)}s (safety mechanism)`, 'ERROR');
+            isCycleRunning = false;
+            lockStartTime = null;
+          }
+        }
+      }
+      } catch (outerError: any) {
+        // CRITICAL: Catch any errors in the outer try to ensure cycle continues
+        logMessage(`OUTER ERROR in cycle loop: ${outerError.message}`, 'ERROR');
+        logMessage(`Stack: ${outerError.stack}`, 'ERROR');
+        // Release lock if it's still held
+        isCycleRunning = false;
+        lockStartTime = null;
+        logMessage('Lock released due to outer error. Waiting 10 seconds before retrying...');
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        // Continue to next iteration - cycle MUST restart
       }
     }
     
