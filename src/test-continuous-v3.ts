@@ -3206,45 +3206,6 @@ async function testContinuous(): Promise<void> {
               throw new Error('Page reload failed, retrying cycle');
             }
       
-            logMessage('\n=== Starting new check cycle ===');
-            
-            // Check if browser is still connected
-            if (!browser.isConnected()) {
-              logMessage('CRITICAL ERROR: Browser is not connected', 'ERROR');
-              logMessage('Terminating process to allow restart...', 'ERROR');
-              process.exit(1);
-            }
-      
-            // IMPORTANT: Reload page at the start of each cycle to ensure fresh data
-            // Add timeout to page reload
-            logMessage('Reloading page to get latest data...');
-            try {
-              await Promise.race([
-                page.reload({ waitUntil: 'networkidle2' }),
-                new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error('Page reload timeout after 30 seconds')), 30000)
-                )
-              ]);
-              await waitRandomTime(2000, 3000);
-              logMessage('Page reloaded, starting checks...');
-              // Reset error counter on successful reload
-              consecutiveCriticalErrors = 0;
-            } catch (reloadError: any) {
-              consecutiveCriticalErrors++;
-              logMessage(`CRITICAL ERROR: Page reload failed or timed out: ${reloadError.message}`, 'ERROR');
-              logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
-              
-              if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
-                logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
-                process.exit(1);
-              }
-              
-              // Wait before retrying
-              logMessage('Waiting 10 seconds before retrying...');
-              await new Promise(resolve => setTimeout(resolve, 10000));
-              throw new Error('Page reload failed, retrying cycle');
-            }
-      
             // Check for "No Deliveries available" and reload up to 3 times if needed
             const hasNoDeliveries = await checkNoDeliveries(page);
             if (hasNoDeliveries) {
