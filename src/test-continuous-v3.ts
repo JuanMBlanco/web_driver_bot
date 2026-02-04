@@ -202,6 +202,7 @@ const projectRoot = path.resolve(__dirname, '..');
 
 let browserPool: BrowserPool;
 let currentLogFile: string | null = null;
+let currentAppLogFile: string | null = null;
 
 const colors = {
   reset: '\x1b[0m',
@@ -209,6 +210,46 @@ const colors = {
   red: '\x1b[31m',
   yellow: '\x1b[33m',
 };
+
+/**
+ * Get or create the daily app log file
+ * Format: logs/app_YYYY-MM-DD.log
+ */
+function getDailyAppLogFile(): string {
+  try {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    
+    const logDir = path.join(projectRoot, 'logs');
+    if (!fileExists(logDir)) {
+      mkdirSync(logDir, { recursive: true });
+    }
+    
+    const logFile = path.join(logDir, `app_${dateStr}.log`);
+    
+    // If the log file changed (new day), update currentAppLogFile
+    if (currentAppLogFile !== logFile) {
+      currentAppLogFile = logFile;
+      // Create file with header if it doesn't exist
+      if (!fileExists(logFile)) {
+        const header = `# Application log started: ${now.toISOString()}\n`;
+        writeFileSync(logFile, header, 'utf8');
+      }
+    }
+    
+    return logFile;
+  } catch (error: any) {
+    // If there's an error, output to console and return a fallback path
+    console.error(`[CRITICAL] Error in getDailyAppLogFile: ${error.message}`);
+    console.error(`[CRITICAL] Stack: ${error.stack}`);
+    // Return a fallback path
+    const fallbackPath = path.join(projectRoot, 'logs', `app_${new Date().toISOString().split('T')[0]}.log`);
+    return fallbackPath;
+  }
+}
 
 function logMessage(message: string, level: 'INFO' | 'ERROR' | 'WARNING' = 'INFO'): void {
   const now = new Date();
@@ -247,12 +288,26 @@ function logMessage(message: string, level: 'INFO' | 'ERROR' | 'WARNING' = 'INFO
     logEntry = `${timestamp} ${levelFormatted} ${message}`;
   }
 
+  // Output to console
   if (level === 'ERROR') {
     console.error(logEntry);
   } else if (level === 'WARNING') {
     console.warn(logEntry);
   } else {
     console.log(logEntry);
+  }
+  
+  // Also write to daily log file (without color codes)
+  try {
+    const logFile = getDailyAppLogFile();
+    const fileLogEntry = `${timestamp} ${levelFormatted} ${message}\n`;
+    appendFileSync(logFile, fileLogEntry, 'utf8');
+  } catch (error: any) {
+    // Don't log errors about logging to avoid infinite loops
+    // Just output to console if file logging fails
+    // Use console.error directly to avoid recursion
+    console.error(`[LOG ERROR] Failed to write to log file: ${error.message}`);
+    console.error(`[LOG ERROR] Stack: ${error.stack}`);
   }
 }
 
@@ -1129,12 +1184,13 @@ async function requestNewLink(page: puppeteer.Page, phoneNumber: string): Promis
  * - <span class="MuiChip-label EzChip-label MuiChip-labelMedium ez-14vsv3w">Expired</span>
  * All within: <div data-testid="delivery-status-text">
  */
-async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLElement, orderNumber: string): Promise<string | null> {
+async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: puppeteerTypes.ElementHandle<HTMLElement> | HTMLElement, orderNumber: string): Promise<string | null> {
   try {
     // First, verify the container is valid by checking if it's an element
+    // If it's an ElementHandle, Puppeteer will serialize it automatically
     const isValidContainer = await page.evaluate((container) => {
       return container && typeof container.querySelectorAll === 'function';
-    }, deliveryContainer);
+    }, deliveryContainer as any);
     
     if (!isValidContainer) {
       logMessage(`  ⚠ Container for order ${orderNumber} is not a valid DOM element, using page-level search`, 'WARNING');
@@ -1161,7 +1217,7 @@ async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLEl
         
         // Try with more flexible selector in status div
         const allChipsInStatus = statusDiv.querySelectorAll('span.MuiChip-label');
-        for (let chip of Array.from(allChipsInStatus)) {
+        for (let chip of Array.from(allChipsInStatus) as HTMLElement[]) {
           const chipText = chip.textContent?.trim();
           if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
             return chipText;
@@ -1173,7 +1229,7 @@ async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLEl
       // Specifically looking for: <span class="MuiChip-label EzChip-label MuiChip-labelMedium ez-14vsv3w">
       const chips = container.querySelectorAll('span.MuiChip-label.EzChip-label.MuiChip-labelMedium.ez-14vsv3w');
       
-      for (let chip of Array.from(chips)) {
+      for (let chip of Array.from(chips) as HTMLElement[]) {
         const chipText = chip.textContent?.trim();
         // Check for specific statuses, especially "Delivery Scheduled" for parameter 2
         if (chipText === 'En Route to Customer' || chipText === 'Delivery Scheduled' || chipText === 'Expired') {
@@ -1183,7 +1239,7 @@ async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLEl
       
       // Strategy 3: Also try with more flexible selector in case classes vary slightly
       const allChips = container.querySelectorAll('span.MuiChip-label.EzChip-label');
-      for (let chip of Array.from(allChips)) {
+      for (let chip of Array.from(allChips) as HTMLElement[]) {
         const chipText = chip.textContent?.trim();
         const hasAllClasses = chip.classList.contains('MuiChip-label') && 
                             chip.classList.contains('EzChip-label') &&
@@ -1196,7 +1252,7 @@ async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLEl
       
       // Strategy 4: Try even more flexible: search for any span with MuiChip-label that contains the status text
       const allSpans = container.querySelectorAll('span');
-      for (let span of Array.from(allSpans)) {
+      for (let span of Array.from(allSpans) as HTMLElement[]) {
         const spanText = span.textContent?.trim();
         if (spanText === 'En Route to Customer' || spanText === 'Delivery Scheduled' || spanText === 'Expired') {
           // Check if it has MuiChip-label class
@@ -1207,7 +1263,7 @@ async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLEl
       }
       
       return null;
-    }, deliveryContainer, orderNumber);
+    }, deliveryContainer as any, orderNumber);
     
     if (!status) {
       logMessage(`  ⚠ Could not find status chip for order ${orderNumber} in container, trying page-level search...`, 'WARNING');
@@ -1223,6 +1279,212 @@ async function getDeliveryStatus(page: puppeteer.Page, deliveryContainer: HTMLEl
     logMessage(`  ✗ Error getting status for order ${orderNumber}: ${error.message}`, 'ERROR');
     // Fall back to page-level search on error
     return await getDeliveryStatusFromPage(page, orderNumber);
+  }
+}
+
+/**
+ * Get full delivery status text from the status container for a specific order
+ * Returns the complete text from the status chip without filtering
+ * Used for logging detected orders
+ */
+async function getFullDeliveryStatusText(page: puppeteer.Page, orderNumber: string): Promise<string | null> {
+  try {
+    // Ensure orderNumber has # prefix (div.ez-7crqac contains the #)
+    const orderNumWithHash = orderNumber.startsWith('#') ? orderNumber : `#${orderNumber}`;
+    
+    // First, get the delivery container for this order
+    const deliveryItemHandle = await page.evaluateHandle((orderNum) => {
+      // Find "Today" section first
+      const h2Elements = Array.from(document.querySelectorAll('h2'));
+      const todayH2 = h2Elements.find(h2 => {
+        const text = h2.textContent?.trim();
+        return text === 'Today';
+      });
+      
+      if (!todayH2) return null;
+      
+      // Find the container for "Today" section
+      let todayContainer: HTMLElement | null = null;
+      let container = todayH2.parentElement;
+      while (container && container !== document.body) {
+        if (container.firstElementChild === todayH2) {
+          todayContainer = container as HTMLElement;
+          break;
+        }
+        container = container.parentElement;
+      }
+      
+      if (!todayContainer) return null;
+      
+            // Only search for order containers within "Today" section
+            // The container is div.ez-1h5x3dy
+            const allDeliveryContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
+            console.log(`getFullDeliveryStatusText: Found ${allDeliveryContainers.length} containers, looking for: ${orderNum}`);
+            for (const container of allDeliveryContainers) {
+              // The order number is in div.ez-7crqac and includes the # (e.g., "#J68-1PM")
+              const orderDiv = container.querySelector('div.ez-7crqac');
+              if (orderDiv) {
+                const orderDivText = orderDiv.textContent?.trim() || '';
+                console.log(`getFullDeliveryStatusText: Found orderDiv with text: "${orderDivText}", comparing with: "${orderNum}"`);
+                // Compare with the order number (should match exactly including #)
+                if (orderDivText === orderNum) {
+                  console.log(`getFullDeliveryStatusText: Match found!`);
+                  return container as HTMLElement;
+                }
+              }
+            }
+            console.log(`getFullDeliveryStatusText: No match found for: ${orderNum}`);
+            return null;
+    }, orderNumWithHash);
+    
+    const itemValue = await deliveryItemHandle.jsonValue();
+    
+    if (!itemValue) {
+      await deliveryItemHandle.dispose();
+      logMessage(`  ⚠ Could not find delivery container for order ${orderNumber} (searched with: ${orderNumWithHash})`, 'WARNING');
+      // Debug: Let's see what order numbers are actually on the page
+      try {
+        const availableOrders = await page.evaluate(() => {
+          const h2Elements = Array.from(document.querySelectorAll('h2'));
+          const todayH2 = h2Elements.find(h2 => h2.textContent?.trim() === 'Today');
+          if (!todayH2) return [];
+          
+          let todayContainer: HTMLElement | null = null;
+          let container = todayH2.parentElement;
+          while (container && container !== document.body) {
+            if (container.firstElementChild === todayH2) {
+              todayContainer = container as HTMLElement;
+              break;
+            }
+            container = container.parentElement;
+          }
+          
+          if (!todayContainer) return [];
+          
+          const allContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
+          const orders: string[] = [];
+          for (const cont of allContainers) {
+            const orderDiv = cont.querySelector('div.ez-7crqac');
+            if (orderDiv) {
+              orders.push(orderDiv.textContent?.trim() || '');
+            }
+          }
+          return orders;
+        });
+        logMessage(`  🔍 Available orders on page: ${availableOrders.slice(0, 10).join(', ')}${availableOrders.length > 10 ? '...' : ''}`, 'INFO');
+      } catch (e: any) {
+        // Ignore debug errors
+      }
+      return null;
+    }
+    
+    // Now get the status text from the container (same selector as getDeliveryStatus but without filtering)
+    const statusText = await page.evaluate((container) => {
+      // Verify container is valid
+      if (!container || typeof container.querySelectorAll !== 'function') {
+        return null;
+      }
+      
+      // Strategy 1: Look for status in data-testid="delivery-status-text" div (most reliable)
+      const statusDiv = container.querySelector('div[data-testid="delivery-status-text"]');
+      if (statusDiv) {
+        // Get the text from the MuiChip-label span (any text, not filtered)
+        const chip = statusDiv.querySelector('span.MuiChip-label');
+        if (chip) {
+          const chipText = chip.textContent?.trim();
+          if (chipText) {
+            return chipText;
+          }
+        }
+        // Fallback: try any span with MuiChip-label class
+        const allChipsInStatus = statusDiv.querySelectorAll('span.MuiChip-label');
+        for (let chip of Array.from(allChipsInStatus)) {
+          const chipText = chip.textContent?.trim();
+          if (chipText) {
+            return chipText;
+          }
+        }
+      }
+      
+      // Strategy 2: Find status chips within this container (any text)
+      const allChips = container.querySelectorAll('span.MuiChip-label');
+      for (let chip of Array.from(allChips)) {
+        const chipText = chip.textContent?.trim();
+        if (chipText) {
+          return chipText;
+        }
+      }
+      
+      return null;
+    }, itemValue as HTMLElement);
+    
+    await deliveryItemHandle.dispose();
+    
+    if (statusText) {
+      logMessage(`  ✓ Found full status text "${statusText}" for order ${orderNumber}`);
+    } else {
+      logMessage(`  ⚠ Could not find status text for order ${orderNumber}`, 'WARNING');
+    }
+    
+    return statusText;
+  } catch (error: any) {
+    logMessage(`  ✗ Error getting full status text for order ${orderNumber}: ${error.message}`, 'ERROR');
+    return null;
+  }
+}
+
+/**
+ * Get full delivery status text by searching the entire page for the order (without filtering)
+ * This is used as a fallback when container is not found
+ */
+async function getFullDeliveryStatusTextFromPage(page: puppeteer.Page, orderNumber: string): Promise<string | null> {
+  try {
+    // Ensure orderNumber has # prefix
+    const orderNumWithHash = orderNumber.startsWith('#') ? orderNumber : `#${orderNumber}`;
+    
+    const statusText = await page.evaluate((orderNum) => {
+      // Find the order container by order number
+      const allContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+      for (const container of allContainers) {
+        const orderDiv = container.querySelector('div.ez-7crqac');
+        if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+          // Strategy 1: Look for status in data-testid="delivery-status-text" div (most reliable)
+          const statusDiv = container.querySelector('div[data-testid="delivery-status-text"]');
+          if (statusDiv) {
+            const chip = statusDiv.querySelector('span.MuiChip-label');
+            if (chip) {
+              const chipText = chip.textContent?.trim();
+              if (chipText) {
+                return chipText; // Return ANY status text, not filtered
+              }
+            }
+            // Try all chips in status div
+            const allChipsInStatus = statusDiv.querySelectorAll('span.MuiChip-label');
+            for (let chip of Array.from(allChipsInStatus) as HTMLElement[]) {
+              const chipText = chip.textContent?.trim();
+              if (chipText) {
+                return chipText; // Return ANY status text
+              }
+            }
+          }
+          
+          // Strategy 2: Find ANY status chip within this container
+          const allChips = container.querySelectorAll('span.MuiChip-label');
+          for (let chip of Array.from(allChips) as HTMLElement[]) {
+            const chipText = chip.textContent?.trim();
+            if (chipText) {
+              return chipText; // Return ANY status text
+            }
+          }
+        }
+      }
+      return null;
+    }, orderNumWithHash);
+    
+    return statusText;
+  } catch (error: any) {
+    logMessage(`  ✗ Error getting full status text from page for order ${orderNumber}: ${error.message}`, 'ERROR');
+    return null;
   }
 }
 
@@ -1406,7 +1668,12 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
         // Get delivery status from page - ONLY search within "Today" section
         // TEMPORARILY: Status check is disabled for testing
         let status: string | null = null;
+        let fullStatusForLogging: string | null = null;
         try {
+          // Ensure orderNumber has # prefix for comparison (div.ez-7crqac contains the #)
+          const orderNumWithHash = orderNumber.startsWith('#') ? orderNumber : `#${orderNumber}`;
+          logMessage(`  🔍 Searching for order container with orderNumber: ${orderNumber}, orderNumWithHash: ${orderNumWithHash}`);
+          
           const deliveryItemHandle = await page.evaluateHandle((orderNum) => {
             // Find "Today" section first
             const h2Elements = Array.from(document.querySelectorAll('h2'));
@@ -1434,24 +1701,88 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
             const allDeliveryContainers = Array.from(todayContainer.querySelectorAll('div.ez-1h5x3dy'));
             for (const container of allDeliveryContainers) {
               const orderDiv = container.querySelector('div.ez-7crqac');
-              if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
-                return container as HTMLElement;
+              if (orderDiv) {
+                const orderDivText = orderDiv.textContent?.trim() || '';
+                // Compare with the order number (should match exactly including #)
+                if (orderDivText === orderNum) {
+                  return container as HTMLElement;
+                }
               }
             }
             return null;
-          }, orderNumber);
+          }, orderNumWithHash);
           
-          const itemValue = await deliveryItemHandle.jsonValue();
+          // Check if handle is valid by trying to get a property
+          const handleValue = await deliveryItemHandle.jsonValue();
           
-          if (itemValue) {
-            status = await getDeliveryStatus(page, itemValue as HTMLElement, orderNumber);
-        if (status) {
+          if (handleValue) {
+            // Use the ElementHandle directly instead of jsonValue for better reliability
+            // Get the filtered status for processing logic (only returns specific statuses)
+            status = await getDeliveryStatus(page, deliveryItemHandle as any, orderNumber);
+            
+            // Also get the full status text (without filtering) from the same container
+            // This is more efficient than searching again
+            const fullStatusText = await page.evaluate((containerHandle) => {
+              // The containerHandle should be the element itself when passed from evaluateHandle
+              const container = containerHandle as HTMLElement;
+              if (!container || typeof container.querySelectorAll !== 'function') {
+                return null;
+              }
+              
+              // Strategy 1: Look for status in data-testid="delivery-status-text" div (most reliable)
+              const statusDiv = container.querySelector('div[data-testid="delivery-status-text"]');
+              if (statusDiv) {
+                const chip = statusDiv.querySelector('span.MuiChip-label');
+                if (chip) {
+                  const chipText = chip.textContent?.trim();
+                  if (chipText) {
+                    return chipText;
+                  }
+                }
+                const allChipsInStatus = statusDiv.querySelectorAll('span.MuiChip-label');
+                for (let chip of Array.from(allChipsInStatus)) {
+                  const chipText = chip.textContent?.trim();
+                  if (chipText) {
+                    return chipText;
+                  }
+                }
+              }
+              
+              // Strategy 2: Find status chips within this container (any text)
+              const allChips = container.querySelectorAll('span.MuiChip-label');
+              for (let chip of Array.from(allChips)) {
+                const chipText = chip.textContent?.trim();
+                if (chipText) {
+                  return chipText;
+                }
+              }
+              
+              return null;
+            }, deliveryItemHandle);
+            
+            if (status) {
               logMessage(`  ✓ Found status "${status}" for order ${orderNumber}`);
-        } else {
-          logMessage(`  ⚠ Status not found for order ${orderNumber}`, 'WARNING');
+            } else if (fullStatusText) {
+              logMessage(`  ✓ Found full status "${fullStatusText}" for order ${orderNumber} (not in filtered list)`);
+            } else {
+              logMessage(`  ⚠ Status not found for order ${orderNumber}`, 'WARNING');
             }
+            
+            // Store full status for logging (use fullStatusText if available, otherwise use filtered status)
+            // Keep status variable for processing logic (filtered)
+            fullStatusForLogging = fullStatusText || status;
           } else {
-            logMessage(`  ⚠ Could not find delivery container for order ${orderNumber}`, 'WARNING');
+            logMessage(`  ⚠ Could not find delivery container for order ${orderNumber} (searching with orderNumWithHash: ${orderNumWithHash})`, 'WARNING');
+            // Try to get status using getFullDeliveryStatusText as fallback
+            try {
+              const fallbackStatus = await getFullDeliveryStatusText(page, orderNumber);
+              if (fallbackStatus) {
+                fullStatusForLogging = fallbackStatus;
+                logMessage(`  ✓ Got status "${fallbackStatus}" for order ${orderNumber} using fallback method`);
+              }
+            } catch (e: any) {
+              // Ignore errors
+            }
           }
           
           await deliveryItemHandle.dispose();
@@ -1460,15 +1791,39 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
           // Continue processing even if status couldn't be retrieved
         }
         
+        // Initialize fullStatusForLogging if not set
+        if (!fullStatusForLogging) {
+          // If we still don't have a status, try one more time with page-level search
+          try {
+            const finalStatus = await getFullDeliveryStatusTextFromPage(page, orderNumber);
+            if (finalStatus) {
+              fullStatusForLogging = finalStatus;
+              logMessage(`  ✓ Got status "${finalStatus}" for order ${orderNumber} using final page-level fallback`);
+            } else {
+              // Try container-based fallback
+              const finalStatus2 = await getFullDeliveryStatusText(page, orderNumber);
+              if (finalStatus2) {
+                fullStatusForLogging = finalStatus2;
+                logMessage(`  ✓ Got status "${finalStatus2}" for order ${orderNumber} using final container fallback`);
+              } else {
+                fullStatusForLogging = status; // Use filtered status as last resort
+              }
+            }
+          } catch (e: any) {
+            fullStatusForLogging = status; // Use filtered status as last resort
+          }
+        }
+        
         // SKIP if status is not "Delivery Scheduled" or "En Route to Customer"
+        // But use full status for logging
         if (status !== 'Delivery Scheduled' && status !== 'En Route to Customer') {
-          logMessage(`  ⏭ SKIPPING order ${orderNumber} - Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`);
+          logMessage(`  ⏭ SKIPPING order ${orderNumber} - Status is "${fullStatusForLogging || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`);
           results.push({
             orderNumber: orderNumber,
             timeText: timeText,
-            status: status,
+            status: fullStatusForLogging, // Use full status for logging (e.g., "Complete")
             shouldClick: false,
-            reason: `Status is "${status || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`,
+            reason: `Status is "${fullStatusForLogging || 'Unknown'}" (must be "Delivery Scheduled" or "En Route to Customer")`,
             actionType: null
           });
           continue;
@@ -1533,6 +1888,20 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
             logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with "Delivery Scheduled" status`);
           }
           
+          // Rule 2b (Fallback): If we passed param2 range, status is "Delivery Scheduled", and current time < param1 start
+          // IMPORTANT: This rule uses actionType = 'param2', which means it will ONLY click "I'm on my way"
+          // and NOT perform the full process (no "Delivery is done" or "Confirm" buttons)
+          // This is intentional - Rule 2b only advances the order to "On Route" status
+          const passedParam2 = currentTimeMs > param2End.getTime();
+          const beforeParam1 = currentTimeMs < param1Start.getTime();
+          if (!shouldClick && passedParam2 && status === 'Delivery Scheduled' && beforeParam1) {
+            shouldClick = true;
+            actionType = 'param2'; // Only "I'm on my way" - NOT full process
+            reason = 'Passed param2 range AND Delivery Scheduled AND before param1 start (fallback param2 - only "I\'m on my way")';
+            logMessage(`  ✓ Rule 2b matched: Order ${orderNumber} passed param2 range, status "Delivery Scheduled", and before param1 start`);
+            logMessage(`  ⚠ Rule 2b will ONLY click "I'm on my way" (actionType=param2), NOT full process`);
+          }
+          
           // Rule 3: If order is in specified status AND delivery time < current time, mark for click
           // This applies to both "En Route to Customer" and "Delivery Scheduled"
           if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
@@ -1548,7 +1917,7 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
         results.push({
           orderNumber: orderNumber,
           timeText: timeText,
-          status: status, // Status from page
+          status: fullStatusForLogging || status, // Use full status for logging if available
           shouldClick: shouldClick,
           reason: reason,
           actionType: actionType
@@ -1716,6 +2085,20 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
           actionType = 'param2';
           reason = 'Param2 range AND Delivery Scheduled (verified element - fallback)';
           logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with "Delivery Scheduled" status`);
+        }
+        
+        // Rule 2b (Fallback): If we passed param2 range, status is "Delivery Scheduled", and current time < param1 start
+        // IMPORTANT: This rule uses actionType = 'param2', which means it will ONLY click "I'm on my way"
+        // and NOT perform the full process (no "Delivery is done" or "Confirm" buttons)
+        // This is intentional - Rule 2b only advances the order to "On Route" status
+        const passedParam2 = currentTimeMs > param2End.getTime();
+        const beforeParam1 = currentTimeMs < param1Start.getTime();
+        if (!shouldClick && passedParam2 && status === 'Delivery Scheduled' && beforeParam1) {
+          shouldClick = true;
+          actionType = 'param2'; // Only "I'm on my way" - NOT full process
+          reason = 'Passed param2 range AND Delivery Scheduled AND before param1 start (fallback param2 - page data - only "I\'m on my way")';
+          logMessage(`  ✓ Rule 2b matched: Order ${orderNumber} passed param2 range, status "Delivery Scheduled", and before param1 start`);
+          logMessage(`  ⚠ Rule 2b will ONLY click "I'm on my way" (actionType=param2), NOT full process`);
         }
         
         // Rule 3: If order is in specified status AND page time < current time, mark for click
@@ -2485,6 +2868,14 @@ async function testContinuous(): Promise<void> {
   // Initialize log file for this execution
   currentLogFile = initializeLogFile();
   
+  // Test app log file creation
+  try {
+    const testLogFile = getDailyAppLogFile();
+    logMessage(`Application log file initialized: ${path.basename(testLogFile)}`);
+  } catch (error: any) {
+    console.error(`Failed to initialize app log file: ${error.message}`);
+  }
+  
   logMessage('Starting continuous delivery monitoring with button actions (V3 - API-based)...');
   logMessage(`Check interval: 60 seconds (1 minute)`);
   
@@ -2699,8 +3090,28 @@ async function testContinuous(): Promise<void> {
             logDetectionCycleHeader(deliveries.length, currentTimeEST);
             
             // Log all detected orders (using cycle time EST)
+            // The status in delivery object should already contain the full status text
+            // (obtained during processing with getFullDeliveryStatusText)
+            logMessage(`Logging ${deliveries.length} order(s) to detected orders log...`);
             for (const delivery of deliveries) {
-              logDetectedOrder(delivery.orderNumber, delivery.timeText, delivery.status, currentTimeEST);
+              // Use the status from delivery object (already contains full status if available)
+              // Only try to get from page if status is null/undefined
+              let fullStatusText: string | null = delivery.status;
+              
+              // If status is null, try to get it from page as fallback
+              if (!fullStatusText) {
+                try {
+                  const pageStatusText = await getFullDeliveryStatusText(page, delivery.orderNumber);
+                  if (pageStatusText) {
+                    fullStatusText = pageStatusText;
+                    logMessage(`  ✓ Got status "${pageStatusText}" for order ${delivery.orderNumber} (from page)`);
+                  }
+                } catch (error: any) {
+                  // Ignore errors, use null which will become "N/A"
+                }
+              }
+              
+              logDetectedOrder(delivery.orderNumber, delivery.timeText, fullStatusText, currentTimeEST);
             }
       
       // Separate orders into categories
