@@ -2386,7 +2386,7 @@ async function performOrderActions(page: puppeteer.Page, orderNumber: string, fu
     }
     
     // Wait for page to update after "I'm on my way" button click (if it happened)
-    await waitRandomTime(500, 1000);
+    await waitRandomTime(200, 400);
     
     // IMPORTANT: Step 2 - Try to click "Delivery is done" button (if it exists) - only for full process
     // This comes AFTER "I'm on my way" button
@@ -3149,12 +3149,24 @@ async function testContinuous(): Promise<void> {
         
         // Wrap entire cycle in a timeout to prevent hanging
         const cycleStartTime = Date.now();
-        const MAX_CYCLE_TIME_MS = 5 * 60 * 1000; // 5 minutes max per cycle
+        const MAX_CYCLE_TIME_MS = 20 * 60 * 1000; // 20 minutes max per cycle (increased for reliability)
         let cycleCompleted = false;
+        let cycleAborted = false; // Flag to track if cycle was aborted
+        
+        // Create a timeout that will warn but NOT interrupt the cycle
+        // The cycle must complete fully before lock is released
+        const cycleTimeoutId = setTimeout(() => {
+          const elapsed = Date.now() - cycleStartTime;
+          if (isCycleRunning) {
+            logMessage(`WARNING: Cycle has been running for ${Math.floor(elapsed / 1000)}s (max: ${MAX_CYCLE_TIME_MS / 1000}s)`, 'WARNING');
+            logMessage(`Cycle timeout reached, but waiting for cycle to complete before releasing lock...`, 'WARNING');
+            cycleAborted = true;
+          }
+        }, MAX_CYCLE_TIME_MS);
         
         try {
-          await Promise.race([
-          (async () => {
+          // Execute cycle - it must complete fully before lock is released
+          await (async () => {
             logMessage('\n=== Starting new check cycle ===');
             
             // Check if browser is still connected
@@ -3496,18 +3508,21 @@ async function testContinuous(): Promise<void> {
             // Wait 60 seconds (1 minute) before next check
             await new Promise(resolve => setTimeout(resolve, 60000));
             cycleCompleted = true;
-            isCycleRunning = false; // Release lock - cycle fully completed
-            lockStartTime = null;
-          })(),
-          new Promise((_, reject) => 
-            setTimeout(() => {
-              const elapsed = Date.now() - cycleStartTime;
-              reject(new Error(`Check cycle timeout after ${Math.floor(elapsed / 1000)} seconds (max: ${MAX_CYCLE_TIME_MS / 1000}s)`));
-            }, MAX_CYCLE_TIME_MS)
-          )
-        ]);
+            // Lock will be released in finally block
+          })();
+          
+          // Clear timeout if cycle completed before timeout
+          clearTimeout(cycleTimeoutId);
+          
+          // If cycle was aborted due to timeout, log it
+          if (cycleAborted) {
+            logMessage(`Cycle exceeded timeout but completed. Lock will be released.`, 'WARNING');
+          }
       } catch (cycleError: any) {
-        // CRITICAL: Catch ALL errors (timeout, unexpected, etc.) to ensure lock is always released
+        // Clear timeout on error
+        clearTimeout(cycleTimeoutId);
+        
+        // CRITICAL: Catch ALL errors (timeout, unexpected, etc.)
         consecutiveCriticalErrors++;
         logMessage(`CRITICAL ERROR: Check cycle failed: ${cycleError.message}`, 'ERROR');
         if (cycleError.stack) {
@@ -3515,9 +3530,9 @@ async function testContinuous(): Promise<void> {
         }
         logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
         
-        // ALWAYS release lock, even on error
-        isCycleRunning = false;
-        lockStartTime = null;
+        // Mark cycle as completed/aborted
+        cycleCompleted = true;
+        cycleAborted = true;
         
         if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
           logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
@@ -3528,11 +3543,26 @@ async function testContinuous(): Promise<void> {
         await new Promise(resolve => setTimeout(resolve, 10000));
         // Continue to next iteration of while loop - cycle MUST restart
       } finally {
-        // CRITICAL: Always ensure lock is released, even if something goes wrong
-        // This is a safety net to prevent deadlocks
-        if (isCycleRunning) {
+        // Clear timeout in finally to ensure cleanup
+        clearTimeout(cycleTimeoutId);
+        
+        // CRITICAL: Only release lock when cycle is actually completed or aborted
+        // Wait a bit to ensure any pending operations complete
+        if (cycleCompleted || cycleAborted) {
+          // Give a small grace period for any final operations
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Now release the lock
+          if (isCycleRunning) {
+            const lockDuration = lockStartTime ? Date.now() - lockStartTime : 0;
+            logMessage(`Releasing lock after ${Math.floor(lockDuration / 1000)}s (cycle ${cycleCompleted ? 'completed' : 'aborted'})`);
+            isCycleRunning = false;
+            lockStartTime = null;
+          }
+        } else {
+          // Safety mechanism: If lock has been held for too long, force release
           const lockDuration = lockStartTime ? Date.now() - lockStartTime : 0;
-          if (lockDuration > MAX_CYCLE_TIME_MS) {
+          if (lockDuration > MAX_LOCK_TIME_MS) {
             logMessage(`CRITICAL: Forcing lock release after ${Math.floor(lockDuration / 1000)}s (safety mechanism)`, 'ERROR');
             isCycleRunning = false;
             lockStartTime = null;
