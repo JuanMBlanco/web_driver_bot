@@ -3255,8 +3255,7 @@ async function testContinuous(): Promise<void> {
                 logMessage('Waiting 60 seconds before next check...');
                 await new Promise(resolve => setTimeout(resolve, 60000));
                 cycleCompleted = true;
-                isCycleRunning = false; // Release lock
-                lockStartTime = null;
+                // Lock will be released in finally block
                 return;
               }
               // Deliveries are now available, continue with processing
@@ -3271,8 +3270,7 @@ async function testContinuous(): Promise<void> {
                 await waitRandomTime(1000, 2000);
               }
               cycleCompleted = true;
-              isCycleRunning = false; // Release lock
-              lockStartTime = null;
+              // Lock will be released in finally block
               return;
             }
             
@@ -3331,8 +3329,7 @@ async function testContinuous(): Promise<void> {
                 logMessage('Waiting 60 seconds before next check...');
                 await new Promise(resolve => setTimeout(resolve, 60000));
                 cycleCompleted = true;
-                isCycleRunning = false; // Release lock
-                lockStartTime = null;
+                // Lock will be released in finally block
                 return;
               }
               // Deliveries are now available, continue with processing
@@ -3543,30 +3540,55 @@ async function testContinuous(): Promise<void> {
         await new Promise(resolve => setTimeout(resolve, 10000));
         // Continue to next iteration of while loop - cycle MUST restart
       } finally {
-        // Clear timeout in finally to ensure cleanup
-        clearTimeout(cycleTimeoutId);
+        // CRITICAL: This block ALWAYS executes, even with unexpected errors or early returns
+        // This ensures the lock is ALWAYS released, preventing deadlocks
         
-        // CRITICAL: Only release lock when cycle is actually completed or aborted
-        // Wait a bit to ensure any pending operations complete
-        if (cycleCompleted || cycleAborted) {
-          // Give a small grace period for any final operations
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          
-          // Now release the lock
+        try {
+          // Clear timeout in finally to ensure cleanup
+          clearTimeout(cycleTimeoutId);
+        } catch (timeoutError) {
+          // Ignore errors clearing timeout
+        }
+        
+        // CRITICAL: Always attempt to release lock, regardless of cycle state
+        // This handles all cases: normal completion, early returns, errors, timeouts
+        try {
           if (isCycleRunning) {
             const lockDuration = lockStartTime ? Date.now() - lockStartTime : 0;
-            logMessage(`Releasing lock after ${Math.floor(lockDuration / 1000)}s (cycle ${cycleCompleted ? 'completed' : 'aborted'})`);
+            
+            // Determine why we're releasing
+            let releaseReason = 'unknown';
+            if (cycleCompleted) {
+              releaseReason = 'completed';
+            } else if (cycleAborted) {
+              releaseReason = 'aborted (timeout)';
+            } else if (lockDuration > MAX_LOCK_TIME_MS) {
+              releaseReason = 'forced (safety mechanism - exceeded max lock time)';
+            } else {
+              releaseReason = 'unexpected state (error or early exit)';
+            }
+            
+            // Give a small grace period for any final operations (only if cycle completed normally)
+            if (cycleCompleted && !cycleAborted) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            
+            // Release the lock
+            logMessage(`Releasing lock after ${Math.floor(lockDuration / 1000)}s (cycle ${releaseReason})`);
             isCycleRunning = false;
             lockStartTime = null;
+          } else {
+            // Lock was already released, but verify state is clean
+            if (lockStartTime !== null) {
+              logMessage(`WARNING: Lock was false but lockStartTime was not null, cleaning up...`, 'WARNING');
+              lockStartTime = null;
+            }
           }
-        } else {
-          // Safety mechanism: If lock has been held for too long, force release
-          const lockDuration = lockStartTime ? Date.now() - lockStartTime : 0;
-          if (lockDuration > MAX_LOCK_TIME_MS) {
-            logMessage(`CRITICAL: Forcing lock release after ${Math.floor(lockDuration / 1000)}s (safety mechanism)`, 'ERROR');
-            isCycleRunning = false;
-            lockStartTime = null;
-          }
+        } catch (releaseError: any) {
+          // CRITICAL: Even if there's an error releasing the lock, force it
+          logMessage(`CRITICAL ERROR releasing lock: ${releaseError.message}, forcing release...`, 'ERROR');
+          isCycleRunning = false;
+          lockStartTime = null;
         }
       }
       } catch (outerError: any) {
