@@ -36,8 +36,8 @@ interface ApiOrder {
   BusinessKindCode: number;
   SaleOrderId: string | null;
   DriverRouteId: string | null;
-  PickupAt: string;
-  DeliveryAt: string;
+  PickupAt: string; // ISO 8601 format: "2026-02-04T10:45:00.000-05:00"
+  DeliveryAt: string; // ISO 8601 format: "2026-02-04T11:30:00.000-05:00"
   DeliveryZoneId: string;
   OriginId: string;
   DestinationId: string;
@@ -45,7 +45,7 @@ interface ApiOrder {
   UserIdAt: string;
   StatusSequence: number;
   StatusCode: number;
-  StatusDescription: string;
+  StatusDescription: string; // e.g., "Finished", "En Route to Customer", "Delivery Scheduled"
   RoutePriority: number;
   Latitude: string;
   Longitude: string;
@@ -60,11 +60,167 @@ interface ApiOrder {
   DisabledBy: string | null;
   DisabledAt: string | null;
   Business: {
-    Ticket: string;
-    Fixed?: any;
+    Ticket: string; // e.g., "P5V-AK6" (format: XXX-XXX)
+    Fixed?: {
+      Tip?: number;
+      Amount?: number;
+      Distance?: number;
+      FeeDriver?: number;
+      FeeOutTown?: number;
+      EstimatedBy?: string;
+      Compensation?: number;
+      FeeDriverBase?: number;
+      MinimumEarning?: number;
+      ExtraMilesOrder?: number;
+      EstimatedEarning?: number;
+      ExtraMilesDriver?: number;
+      FeeDriverOutTown?: number;
+      FeeEstablishment?: number;
+      ExtraMilesDriverAmount?: number;
+    };
     EMailId?: string[];
+    ORDER_IS_READY_TO_PICKUP?: {
+      CreatedAt: string;
+      CreatedBy: string;
+    };
+    [key: string]: any;
   };
-  [key: string]: any;
+  // Additional nested objects from API response
+  bizOrigin?: {
+    Id: string;
+    UserId: string | null;
+    EstablishmentId: string;
+    Address: string;
+    FormattedAddress: string;
+    Latitude: string;
+    Longitude: string;
+    Name: string;
+    EMail: string | null;
+    Phone: string | null;
+    Tag: string | null;
+    Business: any;
+  };
+  bizEstablishment?: {
+    Id: string;
+    Name: string;
+    Address: string;
+    Latitude: string;
+    Longitude: string;
+    EMail: string | null;
+    Phone: string | null;
+    Tag: string | null;
+    Business: any;
+  };
+  bizDestination?: {
+    Id: string;
+    UserId: string | null;
+    EstablishmentId: string | null;
+    Address: string;
+    FormattedAddress: string;
+    Latitude: string;
+    Longitude: string;
+    Name: string;
+    EMail: string | null;
+    Phone: string | null;
+    Tag: string | null;
+    Business?: {
+      Finish?: {
+        Distance?: {
+          Tag: string;
+          Device?: any;
+          Origin?: any;
+          CreatedAt: string;
+          CreatedBy: string;
+          Destination?: any;
+          DistanceText: string;
+          DistanceUnit: string;
+          DurationText: string;
+          DistanceMeter: number;
+          DurationSecond: number;
+        };
+      };
+      Distance?: Array<{
+        Tag: string;
+        Index: number;
+        Origin: any;
+        CreatedAt: string;
+        CreatedBy: string;
+        Destination: any;
+        DistanceText: string;
+        DistanceUnit: string;
+        DurationText: string;
+        DistanceMeter: number;
+        DurationSecond: number;
+      }>;
+    };
+  };
+  bizDeliveryOrderStatusStep?: {
+    Id: string;
+    BusinessKindCode: number;
+    Sequence: number;
+    First: number;
+    Finish: number;
+    Last: number;
+    Canceled: number;
+    Only: number;
+    Code: number;
+    Description: string;
+    BColor: string;
+    FColor: string;
+    Icon: string | null;
+    Tag: string;
+    Business: any;
+  };
+  bizDeliveryZone?: {
+    Id: string;
+    BusinessKindCode: number;
+    Name: string;
+    DeliveryByDriverMax: number;
+    Tag: string;
+    Business: any;
+  };
+  sysUser?: {
+    Id: string;
+    ShortId: string;
+    GroupId: string;
+    Name: string;
+    Avatar: string;
+    Role: string | null;
+    PersonId: string;
+    sysPerson?: {
+      Id: string;
+      ImageId: string;
+      FirstName: string;
+      LastName: string;
+      EMail: string;
+      Phone: string;
+      Tag: string | null;
+      Business: any;
+    };
+    Tag: string;
+    Business: any;
+  };
+  bizEstablishmentServiceQuality?: {
+    Id: string | null;
+    FinalCustomerId: string | null;
+    Quality: number | null;
+    Comment: string | null;
+    Business: any;
+  };
+  bizDriverServiceQuality?: {
+    Id: string | null;
+    FinalCustomerId: string | null;
+    DriverId: string | null;
+    Quality: number | null;
+    Comment: string | null;
+    Business: any;
+  };
+  Payments?: number;
+  Images?: number;
+  Issues?: number;
+  Status?: number;
+  Exported?: number[];
+  [key: string]: any; // Allow additional fields
 }
 
 interface Token {
@@ -248,6 +404,87 @@ function getDailyAppLogFile(): string {
     // Return a fallback path
     const fallbackPath = path.join(projectRoot, 'logs', `app_${new Date().toISOString().split('T')[0]}.log`);
     return fallbackPath;
+  }
+}
+
+/**
+ * Get or create the daily time mismatch log file
+ * Format: logs/time_mismatch_YYYY-MM-DD.log
+ */
+let currentTimeMismatchLogFile: string | null = null;
+
+function getDailyTimeMismatchLogFile(): string {
+  try {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    
+    const logDir = path.join(projectRoot, 'logs');
+    if (!fileExists(logDir)) {
+      mkdirSync(logDir, { recursive: true });
+    }
+    
+    const logFile = path.join(logDir, `time_mismatch_${dateStr}.log`);
+    
+    // If the log file changed (new day), update currentTimeMismatchLogFile
+    if (currentTimeMismatchLogFile !== logFile) {
+      currentTimeMismatchLogFile = logFile;
+      // Create file with header if it doesn't exist
+      if (!fileExists(logFile)) {
+        const header = `# Time Mismatch log started: ${now.toISOString()}\n# This log records when API DeliveryAt differs from page time\n# Format: [timestamp] | orderNumber | Origin Name | API Time | Page Time | Difference\n\n`;
+        writeFileSync(logFile, header, 'utf8');
+      }
+    }
+    
+    return logFile;
+  } catch (error: any) {
+    // If there's an error, output to console and return a fallback path
+    console.error(`[CRITICAL] Error in getDailyTimeMismatchLogFile: ${error.message}`);
+    console.error(`[CRITICAL] Stack: ${error.stack}`);
+    // Return a fallback path
+    const fallbackPath = path.join(projectRoot, 'logs', `time_mismatch_${new Date().toISOString().split('T')[0]}.log`);
+    return fallbackPath;
+  }
+}
+
+/**
+ * Log time mismatch to daily log file
+ * Format: [timestamp] | orderNumber | Origin Name | API Time | Page Time | Difference
+ */
+function logTimeMismatch(orderNumber: string, apiTime: Date, pageTime: Date, originName?: string | null): void {
+  try {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    const milliseconds = String(now.getMilliseconds()).padStart(3, '0');
+
+    const dateStr = `${year}-${month}-${day}`;
+    const timeStr = `${hours}:${minutes}:${seconds}.${milliseconds}`;
+    const timestamp = `${dateStr}T${timeStr}`;
+
+    // Calculate time difference in minutes
+    const diffMs = Math.abs(apiTime.getTime() - pageTime.getTime());
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+    const diffHours = Math.floor(diffMinutes / 60);
+    const diffMins = diffMinutes % 60;
+    const diffStr = diffHours > 0 ? `${diffHours}h ${diffMins}m` : `${diffMins}m`;
+
+    // Format origin name (use "N/A" if not available)
+    const originNameStr = originName || 'N/A';
+
+    const logFile = getDailyTimeMismatchLogFile();
+    const logEntry = `${timestamp} | ${orderNumber} | ${originNameStr} | ${apiTime.toLocaleTimeString()} | ${pageTime.toLocaleTimeString()} | ${diffStr}\n`;
+    
+    appendFileSync(logFile, logEntry, 'utf8');
+  } catch (error: any) {
+    // Don't log errors about logging to avoid infinite loops
+    console.error(`[LOG ERROR] Failed to write to time mismatch log file: ${error.message}`);
   }
 }
 
@@ -1657,7 +1894,151 @@ async function processContinuousDeliveries(page: puppeteer.Page): Promise<{ resu
           continue;
         }
         
-        // Format time text using DeliveryAt
+        // NEW VALIDATION: Compare DeliveryAt from API with page time
+        // If they are different, use fallback (treat as if order is not in API)
+        // IMPORTANT: StatusDescription from API (e.g., "Finished") does NOT match the statuses used in the process
+        // (which require "En Route to Customer" or "Delivery Scheduled"). Therefore, when using fallback,
+        // we MUST get the status from the page, not from the API.
+        const pageTimeData = await getOrderTimeFromPage(page, orderNumber);
+        let useFallback = false;
+        
+        if (pageTimeData) {
+          const pageTime = pageTimeData.parsedDate;
+          const apiDeliveryTime = deliveryAtDate;
+          
+          // Compare times (allow small difference due to timezone/format differences)
+          // Compare only hours and minutes, ignoring seconds
+          const apiTimeStr = `${apiDeliveryTime.getHours()}:${apiDeliveryTime.getMinutes()}`;
+          const pageTimeStr = `${pageTime.getHours()}:${pageTime.getMinutes()}`;
+          
+          if (apiTimeStr !== pageTimeStr) {
+            logMessage(`  ⚠ VALIDATION FAILED: API DeliveryAt (${apiDeliveryTime.toLocaleTimeString()}) differs from page time (${pageTime.toLocaleTimeString()})`);
+            logMessage(`  🔄 Switching to FALLBACK (using page time) for this order`);
+            
+            // Log time mismatch to daily log file (include bizOrigin.Name for tracking)
+            const originName = apiOrder.bizOrigin?.Name || null;
+            logTimeMismatch(orderNumber, apiDeliveryTime, pageTime, originName);
+            
+            useFallback = true;
+          } else {
+            logMessage(`  ✓ VALIDATION PASSED: API DeliveryAt matches page time`);
+          }
+        } else {
+          logMessage(`  ⚠ Could not get page time for validation, using API data`, 'WARNING');
+        }
+        
+        // If validation failed, process this order with fallback (like missing orders)
+        if (useFallback) {
+          // Get time from page for fallback processing
+          const pageTime = pageTimeData!.parsedDate;
+          const pageTimeMs = pageTime.getTime();
+          const timeText = formatDeliveryTime(pageTime);
+          
+          logMessage(`Processing order ${orderNumber} with fallback (API DeliveryAt differs from page time)...`);
+          logMessage(`  🔄 Using FALLBACK (page data) for this order`);
+          logMessage(`  Order ${orderNumber} - Page time: ${timeText} (${pageTime.toLocaleTimeString()})`);
+          
+          // IMPORTANT: Get delivery status from page (NOT from API)
+          // API StatusDescription (e.g., "Finished") does not match process requirements
+          // ("En Route to Customer" or "Delivery Scheduled")
+          let status: string | null = null;
+          let fullStatusForLogging: string | null = null;
+          try {
+            // Use getDeliveryStatusFromPage for filtered status (from page, not API)
+            status = await getDeliveryStatusFromPage(page, orderNumber);
+            
+            // Get full status for logging
+            try {
+              fullStatusForLogging = await getFullDeliveryStatusText(page, orderNumber);
+            } catch (e: any) {
+              fullStatusForLogging = status; // Use filtered status as last resort
+            }
+          } catch (statusError: any) {
+            logMessage(`  ⚠ Error getting status from page: ${statusError.message}`, 'WARNING');
+          }
+          
+          // Use page time for calculations (same as fallback logic)
+          const currentTimeMs = currentTime.getTime();
+          
+          // Param1: Use the page time (hora marcada)
+          const param1Start = new Date(pageTimeMs - 3 * 60 * 1000);
+          const param1End = new Date(pageTimeMs + 3 * 60 * 1000);
+          const inParam1 = currentTimeMs >= param1Start.getTime() && currentTimeMs <= param1End.getTime();
+          
+          // Param2: Use page time - 20 minutes
+          const param2Base = new Date(pageTimeMs - 20 * 60 * 1000);
+          const param2Start = new Date(param2Base.getTime() - 3 * 60 * 1000);
+          const param2End = new Date(param2Base.getTime() + 3 * 60 * 1000);
+          const inParam2 = currentTimeMs >= param2Start.getTime() && currentTimeMs <= param2End.getTime();
+          
+          const currentTimeGreater = currentTimeMs > pageTimeMs;
+          
+          logMessage(`  Status: ${status}, InParam1: ${inParam1}, InParam2: ${inParam2}, CurrentTimeGreater: ${currentTimeGreater}`);
+          logMessage(`  Current time (EST): ${currentTime.toLocaleTimeString()}`);  
+          logMessage(`  Page time: ${pageTime.toLocaleTimeString()}`);
+          logMessage(`  Param1 range (based on page time): ${param1Start.toLocaleTimeString()} to ${param1End.toLocaleTimeString()}`);
+          logMessage(`  Param2 range (based on page time - 20 min): ${param2Start.toLocaleTimeString()} to ${param2End.toLocaleTimeString()}`);
+          
+          // Check if should click based on rules (same as fallback logic)
+          let shouldClick = false;
+          let reason = '';
+          let actionType: 'param1' | 'param2' | 'rule3' | null = null;
+          
+          // Calculate parameter 1 based on page time
+          // Parameter 1: (pageTime - 3 minutes) to (pageTime + 3 minutes)
+          // Rule 1: Orders in param1 range AND status is "En Route to Customer"
+          if (inParam1 && status === 'En Route to Customer') {
+            shouldClick = true;
+            actionType = 'param1';
+            reason = 'In param1 range (page time) AND status is "En Route to Customer" (fallback)';
+            logMessage(`  ✓ Rule 1 matched: Order ${orderNumber} is in param1 range with status "En Route to Customer"`);
+          }
+          
+          // Calculate parameter 2 based on page time - 20 minutes
+          // Parameter 2: (pageTime - 20 minutes - 3 minutes) to (pageTime - 20 minutes + 3 minutes)
+          // Rule 2: Orders in param2 range AND status is "Delivery Scheduled"
+          if (!shouldClick && inParam2 && status === 'Delivery Scheduled') {
+            shouldClick = true;
+            actionType = 'param2';
+            reason = 'In param2 range (page time - 20 min) AND status is "Delivery Scheduled" (fallback)';
+            logMessage(`  ✓ Rule 2 matched: Order ${orderNumber} is in param2 range with status "Delivery Scheduled"`);
+          }
+          
+          // Rule 2b (Fallback): If we passed param2 range, status is "Delivery Scheduled", and current time < param1 start
+          const passedParam2 = currentTimeMs > param2End.getTime();
+          const beforeParam1 = currentTimeMs < param1Start.getTime();
+          if (!shouldClick && passedParam2 && status === 'Delivery Scheduled' && beforeParam1) {
+            shouldClick = true;
+            actionType = 'param2';
+            reason = 'Passed param2 range AND Delivery Scheduled AND before param1 start (fallback param2 - page data - only "I\'m on my way")';
+            logMessage(`  ✓ Rule 2b matched: Order ${orderNumber} passed param2 range, status "Delivery Scheduled", and before param1 start`);
+            logMessage(`  ⚠ Rule 2b will ONLY click "I'm on my way" (actionType=param2), NOT full process`);
+          }
+          
+          // Rule 3: If order is in specified status AND page time < current time
+          if ((status === 'En Route to Customer' || status === 'Delivery Scheduled') && currentTimeGreater) {
+            if (!shouldClick) {
+              shouldClick = true;
+              actionType = 'rule3';
+              reason = `Page time < current time AND status is ${status} (fallback)`;
+              logMessage(`  ✓ Rule 3 matched: Order ${orderNumber} has passed page time with status "${status}"`);
+            }
+          }
+          
+          // Add to results
+          results.push({
+            orderNumber: orderNumber,
+            timeText: timeText,
+            status: fullStatusForLogging || status,
+            shouldClick: shouldClick,
+            reason: reason || 'Not eligible',
+            actionType: actionType
+          });
+          
+          continue; // Skip API processing for this order
+        }
+        
+        // Format time text using DeliveryAt (only if validation passed)
         const timeText = formatDeliveryTime(deliveryAtDate);
         
         logMessage(`Reviewing order ${i + 1}/${apiOrders.length}: ${orderNumber} (${timeText})`);
