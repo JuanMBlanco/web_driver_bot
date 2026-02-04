@@ -2427,40 +2427,136 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
   try {
     logMessage(`Clicking on order ${orderNumber}...`);
     
-    // Find the delivery item
-    let deliveryItemHandle = await page.evaluateHandle((orderNum) => {
-      const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
-      for (const container of allDeliveryContainers) {
-        const orderDiv = container.querySelector('div.ez-7crqac');
-        if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
-          return container as HTMLElement;
+    // Ensure orderNumber has # prefix for comparison
+    const orderNumWithHash = orderNumber.startsWith('#') ? orderNumber : `#${orderNumber}`;
+    const orderNumWithoutHash = orderNumber.startsWith('#') ? orderNumber.substring(1) : orderNumber;
+    
+    // Find the delivery item - Primary method
+    let deliveryItemHandle: puppeteerTypes.ElementHandle<HTMLElement> | null = null;
+    let clickSuccess = false;
+    
+    try {
+      deliveryItemHandle = await page.evaluateHandle((orderNum) => {
+        const allDeliveryContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+        for (const container of allDeliveryContainers) {
+          const orderDiv = container.querySelector('div.ez-7crqac');
+          if (orderDiv && orderDiv.textContent?.trim() === orderNum) {
+            return container as HTMLElement;
+          }
+        }
+        return null;
+      }, orderNumWithHash) as puppeteerTypes.ElementHandle<HTMLElement>;
+      
+      const itemValue = await deliveryItemHandle.jsonValue();
+      if (itemValue) {
+        // Try clicking with boundingBox first
+        const box = await deliveryItemHandle.boundingBox();
+        if (box) {
+          try {
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await waitRandomTime(500, 1000);
+            await page.mouse.down();
+            await page.mouse.up();
+            clickSuccess = true;
+            logMessage(`  ✓ Clicked order using mouse (boundingBox method)`);
+          } catch (mouseError: any) {
+            logMessage(`  ⚠ Mouse click failed: ${mouseError.message}, trying DOM click...`, 'WARNING');
+          }
+        }
+        
+        // If mouse click didn't work, try DOM click
+        if (!clickSuccess) {
+          try {
+            await page.evaluate((handle) => {
+              const element = handle as HTMLElement;
+              if (element) {
+                element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                element.click();
+              }
+            }, deliveryItemHandle);
+            clickSuccess = true;
+            logMessage(`  ✓ Clicked order using DOM click method`);
+          } catch (domError: any) {
+            logMessage(`  ⚠ DOM click failed: ${domError.message}, trying fallback methods...`, 'WARNING');
+          }
         }
       }
-      return null;
-    }, orderNumber);
-    
-    const itemValue = await deliveryItemHandle.jsonValue();
-    if (!itemValue) {
-      logMessage(`Could not find delivery item for order ${orderNumber}`, 'ERROR');
-      return false;
+    } catch (primaryError: any) {
+      logMessage(`  ⚠ Primary method failed: ${primaryError.message}, trying fallback...`, 'WARNING');
     }
     
-    // Click the element
-    const box = await (deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>).boundingBox();
-    if (box) {
-      // Click on delivery item
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      await waitRandomTime(500, 1000);
-      await page.mouse.down();
-      await page.mouse.up();
-    } else {
-      // Fallback click
-      await page.evaluate((handle) => {
-        const element = handle as HTMLElement;
-        if (element) {
-          element.click();
+    // Fallback: Try to find and click using alternative DOM methods
+    if (!clickSuccess) {
+      logMessage(`  Attempting fallback DOM click methods for order ${orderNumber}...`);
+      
+      try {
+        const fallbackSuccess = await page.evaluate((orderNum) => {
+          // Method 1: Try finding by text content in all containers
+          const allContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+          for (const container of allContainers) {
+            const orderDiv = container.querySelector('div.ez-7crqac');
+            if (orderDiv) {
+              const text = orderDiv.textContent?.trim() || '';
+              if (text === orderNum || text === orderNum.replace('#', '')) {
+                container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                (container as HTMLElement).click();
+                return true;
+              }
+            }
+          }
+          
+          // Method 2: Try finding by any element containing the order number
+          const allElements = Array.from(document.querySelectorAll('*'));
+          for (const element of allElements) {
+            const text = element.textContent?.trim() || '';
+            if (text === orderNum || text === orderNum.replace('#', '')) {
+              // Check if it's a clickable container (has parent with class ez-1h5x3dy)
+              let parent = element.parentElement;
+              while (parent) {
+                if (parent.classList.contains('ez-1h5x3dy')) {
+                  parent.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  (parent as HTMLElement).click();
+                  return true;
+                }
+                parent = parent.parentElement;
+              }
+            }
+          }
+          
+          // Method 3: Try finding by data attributes or other selectors
+          const clickableElements = Array.from(document.querySelectorAll('div[class*="ez-"], a[href*="delivery"], button'));
+          for (const element of clickableElements) {
+            const text = element.textContent?.trim() || '';
+            if (text.includes(orderNum) || text.includes(orderNum.replace('#', ''))) {
+              element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              (element as HTMLElement).click();
+              return true;
+            }
+          }
+          
+          return false;
+        }, orderNumWithHash);
+        
+        if (fallbackSuccess) {
+          clickSuccess = true;
+          logMessage(`  ✓ Clicked order using fallback DOM method`);
+        } else {
+          logMessage(`  ✗ All fallback methods failed for order ${orderNumber}`, 'ERROR');
         }
-      }, deliveryItemHandle as puppeteerTypes.ElementHandle<HTMLElement>);
+      } catch (fallbackError: any) {
+        logMessage(`  ✗ Fallback DOM click failed: ${fallbackError.message}`, 'ERROR');
+      }
+    }
+    
+    // Clean up handle if it exists
+    if (deliveryItemHandle) {
+      await deliveryItemHandle.dispose();
+    }
+    
+    // If click failed, return false
+    if (!clickSuccess) {
+      logMessage(`Could not click delivery item for order ${orderNumber}`, 'ERROR');
+      return false;
     }
     
     await waitRandomTime(1000, 2000);
@@ -2478,7 +2574,6 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
     const currentUrl = page.url();
     if (currentUrl.includes('/deliveries')) {
       logMessage(`Navigation failed, still on deliveries page`, 'WARNING');
-      await deliveryItemHandle.dispose();
       return false;
     }
     
@@ -2494,7 +2589,6 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
     const currentUrlBeforeReturn = page.url();
     if (currentUrlBeforeReturn.includes('/deliveries')) {
       logMessage(`Already on deliveries page, no need to click link`);
-      await deliveryItemHandle.dispose();
       return true;
     }
     
@@ -2547,7 +2641,6 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
       const finalUrl = page.url();
       if (finalUrl.includes('/deliveries')) {
         logMessage(`✓ Successfully returned to deliveries list`);
-        await deliveryItemHandle.dispose();
         return true;
       } else {
         logMessage('Not on deliveries page after clicking link, trying alternative methods...', 'WARNING');
@@ -2565,7 +2658,6 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
       const finalUrl = page.url();
       if (finalUrl.includes('/deliveries')) {
         logMessage(`✓ Successfully returned to deliveries list (via goBack)`);
-        await deliveryItemHandle.dispose();
         return true;
       }
     } catch (backError) {
@@ -2578,11 +2670,9 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
       await page.goto(config.task.url, { waitUntil: 'networkidle2' });
       await waitRandomTime(1000, 2000);
       logMessage(`✓ Successfully returned to deliveries list (via direct navigation)`);
-      await deliveryItemHandle.dispose();
       return true;
     } catch (navError) {
       logMessage('Failed to return to deliveries list', 'ERROR');
-      await deliveryItemHandle.dispose();
       return false;
     }
   } catch (error: any) {
