@@ -2571,9 +2571,108 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
     await waitRandomTime(1000, 2000);
     
     // Check if navigation was successful
-    const currentUrl = page.url();
-    if (currentUrl.includes('/deliveries')) {
-      logMessage(`Navigation failed, still on deliveries page`, 'WARNING');
+    let currentUrl = page.url();
+    let navigationSuccess = !currentUrl.includes('/deliveries');
+    
+    // Fallback: If navigation failed, try alternative click methods
+    if (!navigationSuccess && clickSuccess) {
+      logMessage(`Navigation failed after click, attempting fallback DOM click methods...`, 'WARNING');
+      
+      try {
+        const fallbackClickSuccess = await page.evaluate((orderNum) => {
+          // Method 1: Try finding container and clicking directly
+          const allContainers = Array.from(document.querySelectorAll('div.ez-1h5x3dy'));
+          for (const container of allContainers) {
+            const orderDiv = container.querySelector('div.ez-7crqac');
+            if (orderDiv) {
+              const text = orderDiv.textContent?.trim() || '';
+              if (text === orderNum || text === orderNum.replace('#', '')) {
+                // Try clicking the container itself
+                container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                (container as HTMLElement).click();
+                
+                // Also try clicking any clickable child elements
+                const clickableChildren = container.querySelectorAll('a, button, [role="button"], [onclick]');
+                if (clickableChildren.length > 0) {
+                  (clickableChildren[0] as HTMLElement).click();
+                }
+                
+                return true;
+              }
+            }
+          }
+          
+          // Method 2: Try finding by link or button with order number
+          const allLinks = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+          for (const link of allLinks) {
+            const text = link.textContent?.trim() || '';
+            const href = link.getAttribute('href') || '';
+            if (text.includes(orderNum) || text.includes(orderNum.replace('#', '')) || 
+                href.includes(orderNum) || href.includes(orderNum.replace('#', ''))) {
+              link.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              (link as HTMLElement).click();
+              return true;
+            }
+          }
+          
+          // Method 3: Try finding the order number element and clicking its parent container
+          const allElements = Array.from(document.querySelectorAll('*'));
+          for (const element of allElements) {
+            const text = element.textContent?.trim() || '';
+            if (text === orderNum || text === orderNum.replace('#', '')) {
+              // Find the closest clickable parent
+              let current: HTMLElement | null = element as HTMLElement;
+              while (current) {
+                if (current.classList.contains('ez-1h5x3dy') || 
+                    current.tagName === 'A' || 
+                    current.tagName === 'BUTTON' ||
+                    current.getAttribute('role') === 'button' ||
+                    current.onclick !== null) {
+                  current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  current.click();
+                  return true;
+                }
+                current = current.parentElement;
+              }
+            }
+          }
+          
+          return false;
+        }, orderNumWithHash);
+        
+        if (fallbackClickSuccess) {
+          logMessage(`  ✓ Attempted fallback DOM click, waiting for navigation...`);
+          await waitRandomTime(1500, 2500);
+          
+          // Wait for navigation again
+          try {
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+          } catch (navError2) {
+            logMessage('Navigation after fallback click may have completed or timed out, continuing...', 'WARNING');
+          }
+          
+          await waitRandomTime(1000, 2000);
+          
+          // Check navigation again
+          currentUrl = page.url();
+          navigationSuccess = !currentUrl.includes('/deliveries');
+          
+          if (navigationSuccess) {
+            logMessage(`  ✓ Fallback click successful, navigation completed`);
+          } else {
+            logMessage(`  ✗ Fallback click did not trigger navigation`, 'WARNING');
+          }
+        } else {
+          logMessage(`  ✗ Fallback DOM click methods failed`, 'WARNING');
+        }
+      } catch (fallbackError: any) {
+        logMessage(`  ✗ Error in fallback click: ${fallbackError.message}`, 'ERROR');
+      }
+    }
+    
+    // Final check: if navigation still failed, return false
+    if (!navigationSuccess) {
+      logMessage(`Navigation failed, still on deliveries page after all attempts`, 'WARNING');
       return false;
     }
     
