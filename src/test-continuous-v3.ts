@@ -488,6 +488,184 @@ function logTimeMismatch(orderNumber: string, apiTime: Date, pageTime: Date, ori
   }
 }
 
+/**
+ * Get or create screenshot folder for an order
+ * Format: logs/screenshots/{orderNumber}/
+ * Reuses existing folder if it already exists
+ */
+function getOrderScreenshotFolder(orderNumber: string): string {
+  try {
+    // Remove # prefix if present for folder name
+    const cleanOrderNumber = orderNumber.startsWith('#') ? orderNumber.substring(1) : orderNumber;
+    
+    const screenshotsDir = path.join(projectRoot, 'logs', 'screenshots');
+    if (!fileExists(screenshotsDir)) {
+      mkdirSync(screenshotsDir, { recursive: true });
+    }
+    
+    const orderFolder = path.join(screenshotsDir, cleanOrderNumber);
+    if (!fileExists(orderFolder)) {
+      mkdirSync(orderFolder, { recursive: true });
+    }
+    
+    return orderFolder;
+  } catch (error: any) {
+    console.error(`[CRITICAL] Error creating screenshot folder for order ${orderNumber}: ${error.message}`);
+    // Return fallback path
+    return path.join(projectRoot, 'logs', 'screenshots', orderNumber);
+  }
+}
+
+/**
+ * Get or create error screenshot folder
+ * Format: logs/screenshots/errors/
+ */
+function getErrorScreenshotFolder(): string {
+  try {
+    const screenshotsDir = path.join(projectRoot, 'logs', 'screenshots');
+    if (!fileExists(screenshotsDir)) {
+      mkdirSync(screenshotsDir, { recursive: true });
+    }
+    
+    const errorFolder = path.join(screenshotsDir, 'errors');
+    if (!fileExists(errorFolder)) {
+      mkdirSync(errorFolder, { recursive: true });
+    }
+    
+    return errorFolder;
+  } catch (error: any) {
+    console.error(`[CRITICAL] Error creating error screenshot folder: ${error.message}`);
+    return path.join(projectRoot, 'logs', 'screenshots', 'errors');
+  }
+}
+
+/**
+ * Convert Date to EST/EDT timezone and format as string for filename
+ * Format: YYYY-MM-DD_HH-MM-SS
+ * Handles DST: EDT (UTC-4) from second Sunday in March to first Sunday in November
+ * EST (UTC-5) otherwise
+ */
+function formatTimestampEST(date: Date = new Date()): string {
+  try {
+    // Get UTC time
+    const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
+    
+    // Determine if we're in DST (EDT) or standard time (EST)
+    // DST: Second Sunday in March to First Sunday in November
+    const year = date.getUTCFullYear();
+    const month = date.getUTCMonth();
+    const day = date.getUTCDate();
+    
+    // Find second Sunday in March
+    const marchFirst = new Date(Date.UTC(year, 2, 1)); // March 1
+    const marchFirstDay = marchFirst.getUTCDay();
+    const daysToSecondSunday = (7 - marchFirstDay) % 7 + 7; // Days to second Sunday
+    const dstStart = new Date(Date.UTC(year, 2, 1 + daysToSecondSunday, 7)); // 7 AM UTC = 2 AM EST
+    
+    // Find first Sunday in November
+    const novemberFirst = new Date(Date.UTC(year, 10, 1)); // November 1
+    const novemberFirstDay = novemberFirst.getUTCDay();
+    const daysToFirstSunday = (7 - novemberFirstDay) % 7;
+    const dstEnd = new Date(Date.UTC(year, 10, 1 + daysToFirstSunday, 6)); // 6 AM UTC = 1 AM EST
+    
+    // Check if current date is in DST period
+    const isDST = date >= dstStart && date < dstEnd;
+    const estOffset = isDST ? -4 * 60 : -5 * 60; // EDT: UTC-4, EST: UTC-5 (in minutes)
+    
+    const estTime = new Date(utc + (estOffset * 60000));
+    
+    const estYear = estTime.getUTCFullYear();
+    const estMonth = String(estTime.getUTCMonth() + 1).padStart(2, '0');
+    const estDay = String(estTime.getUTCDate()).padStart(2, '0');
+    const estHours = String(estTime.getUTCHours()).padStart(2, '0');
+    const estMinutes = String(estTime.getUTCMinutes()).padStart(2, '0');
+    const estSeconds = String(estTime.getUTCSeconds()).padStart(2, '0');
+    
+    return `${estYear}-${estMonth}-${estDay}_${estHours}-${estMinutes}-${estSeconds}`;
+  } catch (error: any) {
+    console.error(`[CRITICAL] Error formatting timestamp EST: ${error.message}`);
+    // Fallback to UTC
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
+  }
+}
+
+/**
+ * Determine screenshot prefix based on action type
+ * Returns "onway" for param2 (only "I'm on my way") or "delivered" for full process
+ */
+function getScreenshotPrefix(fullProcess: boolean): string {
+  return fullProcess ? 'delivered' : 'onway';
+}
+
+/**
+ * Take screenshot and save HTML for an order click
+ * Format: {prefix}_{orderNumber}_{timestamp}.png and .html
+ */
+async function captureOrderScreenshot(page: puppeteer.Page, orderNumber: string, fullProcess: boolean): Promise<void> {
+  try {
+    const orderFolder = getOrderScreenshotFolder(orderNumber);
+    const prefix = getScreenshotPrefix(fullProcess);
+    const timestamp = formatTimestampEST();
+    const cleanOrderNumber = orderNumber.startsWith('#') ? orderNumber.substring(1) : orderNumber;
+    
+    const screenshotPath = path.join(orderFolder, `${prefix}_${cleanOrderNumber}_${timestamp}.png`);
+    const htmlPath = path.join(orderFolder, `${prefix}_${cleanOrderNumber}_${timestamp}.html`);
+    
+    // Take screenshot
+    await page.screenshot({ 
+      path: screenshotPath, 
+      fullPage: true 
+    });
+    
+    // Get and save HTML
+    const htmlContent = await page.content();
+    writeFileSync(htmlPath, htmlContent, 'utf8');
+    
+    logMessage(`  📸 Screenshot and HTML saved: ${path.basename(screenshotPath)}`);
+  } catch (error: any) {
+    logMessage(`  ⚠ Failed to capture screenshot/HTML for order ${orderNumber}: ${error.message}`, 'WARNING');
+  }
+}
+
+/**
+ * Take screenshot and save HTML for critical errors
+ * Format: error_{timestamp}.png and .html
+ */
+async function captureCriticalErrorScreenshot(page: puppeteer.Page, errorMessage: string): Promise<void> {
+  try {
+    const errorFolder = getErrorScreenshotFolder();
+    const timestamp = formatTimestampEST();
+    
+    // Sanitize error message for filename (remove special characters)
+    const sanitizedError = errorMessage.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
+    
+    const screenshotPath = path.join(errorFolder, `error_${timestamp}_${sanitizedError}.png`);
+    const htmlPath = path.join(errorFolder, `error_${timestamp}_${sanitizedError}.html`);
+    
+    // Take screenshot
+    await page.screenshot({ 
+      path: screenshotPath, 
+      fullPage: true 
+    });
+    
+    // Get and save HTML
+    const htmlContent = await page.content();
+    writeFileSync(htmlPath, htmlContent, 'utf8');
+    
+    logMessage(`  📸 Critical error screenshot and HTML saved: ${path.basename(screenshotPath)}`, 'ERROR');
+  } catch (error: any) {
+    // Don't log error about error logging to avoid infinite loops
+    console.error(`[CRITICAL] Failed to capture error screenshot: ${error.message}`);
+  }
+}
+
 function logMessage(message: string, level: 'INFO' | 'ERROR' | 'WARNING' = 'INFO'): void {
   const now = new Date();
   const year = now.getFullYear();
@@ -3060,7 +3238,12 @@ async function clickDeliveryAndReturn(page: puppeteer.Page, orderNumber: string,
     logMessage(`Successfully navigated to order details`);
     
     // Perform button actions on the order page
-    await performOrderActions(page, orderNumber, fullProcess);
+    const actionsSuccess = await performOrderActions(page, orderNumber, fullProcess);
+    
+    // Capture screenshot and HTML after performing actions (if successful)
+    if (actionsSuccess) {
+      await captureOrderScreenshot(page, orderNumber, fullProcess);
+    }
     
     // Return to deliveries list
     logMessage(`Returning to deliveries list...`);
@@ -3553,6 +3736,14 @@ async function testContinuous(): Promise<void> {
             // Check if browser is still connected
             if (!browser.isConnected()) {
               logMessage('CRITICAL ERROR: Browser is not connected', 'ERROR');
+              // Try to capture screenshot if page is available
+              try {
+                if (page && !page.isClosed()) {
+                  await captureCriticalErrorScreenshot(page, 'Browser disconnected');
+                }
+              } catch (screenshotError: any) {
+                // Ignore screenshot errors
+              }
               logMessage('Terminating process to allow restart...', 'ERROR');
               process.exit(1);
             }
@@ -3575,6 +3766,15 @@ async function testContinuous(): Promise<void> {
               consecutiveCriticalErrors++;
               logMessage(`CRITICAL ERROR: Page reload failed or timed out: ${reloadError.message}`, 'ERROR');
               logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              // Capture screenshot if page is available
+              try {
+                if (page && !page.isClosed()) {
+                  await captureCriticalErrorScreenshot(page, `Page reload failed: ${reloadError.message}`);
+                }
+              } catch (screenshotError: any) {
+                // Ignore screenshot errors
+              }
               
               if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
                 logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
@@ -3631,6 +3831,15 @@ async function testContinuous(): Promise<void> {
               logMessage(`CRITICAL ERROR: Failed to navigate to deliveries page or timed out: ${navError.message}`, 'ERROR');
               logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
               
+              // Capture screenshot if page is available
+              try {
+                if (page && !page.isClosed()) {
+                  await captureCriticalErrorScreenshot(page, `Navigation failed: ${navError.message}`);
+                }
+              } catch (screenshotError: any) {
+                // Ignore screenshot errors
+              }
+              
               if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
                 logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
                 process.exit(1);
@@ -3645,6 +3854,15 @@ async function testContinuous(): Promise<void> {
               consecutiveCriticalErrors++;
               logMessage('CRITICAL ERROR: Could not navigate to deliveries page', 'ERROR');
               logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              // Capture screenshot if page is available
+              try {
+                if (page && !page.isClosed()) {
+                  await captureCriticalErrorScreenshot(page, 'Could not navigate to deliveries page');
+                }
+              } catch (screenshotError: any) {
+                // Ignore screenshot errors
+              }
               
               if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
                 logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
@@ -3697,6 +3915,15 @@ async function testContinuous(): Promise<void> {
               consecutiveCriticalErrors++;
               logMessage(`CRITICAL ERROR: Failed to process deliveries or timed out: ${processError.message}`, 'ERROR');
               logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+              
+              // Capture screenshot if page is available
+              try {
+                if (page && !page.isClosed()) {
+                  await captureCriticalErrorScreenshot(page, `Process deliveries failed: ${processError.message}`);
+                }
+              } catch (screenshotError: any) {
+                // Ignore screenshot errors
+              }
               
               if (consecutiveCriticalErrors >= MAX_CONSECUTIVE_CRITICAL_ERRORS) {
                 logMessage('CRITICAL ERROR: Maximum consecutive critical errors reached. Terminating process to allow restart...', 'ERROR');
@@ -3868,6 +4095,15 @@ async function testContinuous(): Promise<void> {
           logMessage(`Stack: ${cycleError.stack}`, 'ERROR');
         }
         logMessage(`Consecutive critical errors: ${consecutiveCriticalErrors}/${MAX_CONSECUTIVE_CRITICAL_ERRORS}`, 'ERROR');
+        
+        // Capture screenshot if page is available
+        try {
+          if (page && !page.isClosed()) {
+            await captureCriticalErrorScreenshot(page, `Check cycle failed: ${cycleError.message}`);
+          }
+        } catch (screenshotError: any) {
+          // Ignore screenshot errors
+        }
         
         // Mark cycle as completed/aborted
         cycleCompleted = true;
